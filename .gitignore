@@ -1,0 +1,24 @@
+node_modules/
+
+.env
+.env.local
+.env.test
+
+# Database artifacts
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.db
+
+# Runtime data (whitelist only files/subfolders that must be versioned)
+data/*
+!data/.gitkeep
+
+runs/
+runs-*/
+*.log
+npm-debug.log
+
+.DS_Store
+.vscode/
+.idea/
