@@ -9,6 +9,8 @@ export const SettingsKeys = {
   artifactRetentionDays: 'artifact_retention_days',
   taskTimeoutMs: 'task_timeout_ms',
   pendingSelectionTtlMs: 'pending_selection_ttl_ms',
+  taskIdLength: 'task_id_length',
+  projectTaskHistoryLimit: 'project_task_history_limit',
 };
 
 function nowIso() {
@@ -39,6 +41,8 @@ export function ensureDefaultSettings() {
     [SettingsKeys.artifactRetentionDays, String(config.artifactRetentionDays)],
     [SettingsKeys.taskTimeoutMs, String(config.taskTimeoutMs)],
     [SettingsKeys.pendingSelectionTtlMs, String(config.pendingSelectionTtlMs)],
+    [SettingsKeys.taskIdLength, '2'],
+    [SettingsKeys.projectTaskHistoryLimit, '15'],
   ]);
 
   for (const [key, value] of defaults.entries()) {
@@ -55,3 +59,17 @@ export function getOrchestratorProviderDefault() {
   return getSetting(SettingsKeys.orchestratorProviderDefault) || (config.orchestratorProvider === 'auto' ? 'gemini-cli' : config.orchestratorProvider);
 }
 
+function parsePositiveIntOr(defaultValue, raw, { min = 1, max = Number.MAX_SAFE_INTEGER } = {}) {
+  const n = Number.parseInt(String(raw || ''), 10);
+  if (!Number.isFinite(n)) return defaultValue;
+  if (n < min || n > max) return defaultValue;
+  return n;
+}
+
+export function getTaskIdLength() {
+  return parsePositiveIntOr(2, getSetting(SettingsKeys.taskIdLength), { min: 1, max: 8 });
+}
+
+export function getProjectTaskHistoryLimit() {
+  return parsePositiveIntOr(15, getSetting(SettingsKeys.projectTaskHistoryLimit), { min: 1, max: 500 });
+}

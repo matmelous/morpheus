@@ -8,7 +8,14 @@ import { truncate } from '../utils/text.js';
 import { projectManager } from '../services/project-manager.js';
 import { downloadMedia, sendMessage, setInboundMessageHandler } from '../services/whatsapp.js';
 import { taskStore } from '../services/task-store.js';
-import { getRunnerDefault, getOrchestratorProviderDefault, setSetting, SettingsKeys } from '../services/settings.js';
+import {
+  getRunnerDefault,
+  getOrchestratorProviderDefault,
+  getTaskIdLength,
+  getProjectTaskHistoryLimit,
+  setSetting,
+  SettingsKeys,
+} from '../services/settings.js';
 import { executor } from '../services/executor.js';
 import { orchestrateTaskMessage } from '../services/orchestrator.js';
 import { extFromMime, safeFileName, buildCanonicalMediaMessage } from '../services/media-utils.js';
@@ -120,7 +127,7 @@ function resolveProjectPath(pathArg) {
 }
 
 function parseTaskPrefix(text) {
-  const m = String(text || '').match(/^(task-[a-f0-9]{6,})\s*:\s*([\s\S]+)$/i);
+  const m = String(text || '').match(/^([a-z0-9]{2}|task-[a-f0-9]{6,})\s*:\s*([\s\S]+)$/i);
   if (!m) return null;
   return { taskId: m[1], message: m[2].trim() };
 }
@@ -128,8 +135,16 @@ function parseTaskPrefix(text) {
 function parseSelectionReply(text) {
   const t = String(text || '').trim();
   if (/^\d+$/.test(t)) return { index: parseInt(t, 10) };
-  if (/^task-[a-f0-9]{6,}$/i.test(t)) return { taskId: t };
+  if (/^([a-z0-9]{2}|task-[a-f0-9]{6,})$/i.test(t)) return { taskId: t };
   return null;
+}
+
+function resolveTaskArgForPhone(phone, arg, { limit = 10, projectId = null } = {}) {
+  const tasks = taskStore.listTasksByPhone(phone, { limit, projectId });
+  const user = taskStore.getUser(phone);
+  if (!arg) return { taskId: user?.focused_task_id || null, tasks, user };
+  if (/^\d+$/.test(arg)) return { taskId: tasks[parseInt(arg, 10) - 1]?.task_id || null, tasks, user };
+  return { taskId: arg, tasks, user };
 }
 
 function isPurchaseConfirmationText(text) {
@@ -178,10 +193,13 @@ async function handleCommand(phone, rawText) {
       `🤖 *Morpheus*\n\n` +
       `Envie uma mensagem para criar/continuar tasks. Suporta multiplas tasks em paralelo.\n\n` +
       `*Comandos:*\n` +
-      `/status - Ver tasks recentes\n` +
+      `/status [projectId] - Ver tasks recentes (opcional: filtrar por projeto)\n` +
       `/cancel [taskId|numero] - Cancelar run (fila ou rodando)\n` +
       `/new [texto] - Criar uma nova task (e opcionalmente iniciar)\n` +
       `/task [taskId|numero] - Definir foco da task\n` +
+      `/queue [taskId|numero] - Ver fila de execucao da task\n` +
+      `/queue-edit <taskId|numero> <itemId> <texto> - Editar item da fila\n` +
+      `/queue-del <taskId|numero> <itemId|all> - Remover item da fila\n` +
       `/projects - Listar projetos\n` +
       `/project [id] - Ver/alterar projeto default (cria task nova)\n` +
       `/project-add <id> <cwd> [type] [name...] - (admin) Adicionar/atualizar projeto\n` +
@@ -192,11 +210,12 @@ async function handleCommand(phone, rawText) {
       `/project-rm <id> - (admin) Remover projeto\n` +
       `/runner [kind] - Ver/alterar runner (codex-cli|gemini-cli|claude-cli|cursor-cli|desktop-agent|auto)\n` +
       `/orchestrator [provider] - Ver/alterar planner (gemini-cli|openrouter|auto)\n\n` +
+      `/task-policy [taskIdLen] [historyLimit] - Ver/alterar politica de tasks\n\n` +
       `/confirm - Confirmar uma compra pendente (quando solicitado)\n\n` +
       `/memory - Ver memoria compartilhada\n` +
       `/remember <texto> - Adicionar preferencia/definicao na memoria\n` +
       `/forget-memory - Limpar memoria compartilhada\n\n` +
-      `Dica: para escolher uma task explicitamente: \`task-xxxx: sua mensagem\`\n` +
+      `Dica: para escolher uma task explicitamente: \`ab: sua mensagem\`\n` +
       `Dica 2: voce pode falar em linguagem natural, ex.: "troca pro projeto argo", "usa runner claude nesta task".`
     );
     return true;
@@ -245,21 +264,105 @@ async function handleCommand(phone, rawText) {
   }
 
   if (cmd === '/status') {
-    const tasks = taskStore.listTasksByPhone(phone, { limit: 10 });
+    const projectFilter = (parts[1] || '').trim() || null;
+    const tasks = taskStore.listTasksByPhone(phone, { limit: 10, projectId: projectFilter });
     const user = taskStore.getUser(phone);
 
     if (tasks.length === 0) {
-      await sendMessage(phone, '📭 Nenhuma task ainda. Envie uma mensagem para criar a primeira.');
+      if (projectFilter) {
+        await sendMessage(phone, `📭 Nenhuma task para o projeto *${projectFilter}*.`);
+      } else {
+        await sendMessage(phone, '📭 Nenhuma task ainda. Envie uma mensagem para criar a primeira.');
+      }
       return true;
     }
 
     const lines = tasks.map((t, i) => {
       const focus = user?.focused_task_id === t.task_id ? ' ← foco' : '';
       const upd = (t.last_update || '').toString().slice(0, 120);
-      return `${i + 1}) *${t.task_id}* (${t.status}) [${t.runner_kind}] (${t.project_id})${focus}\n   ${upd || '...'} `;
+      const queued = taskStore.listExecutionItems(t.task_id).length;
+      return `${i + 1}) *${t.task_id}* (${t.status}) [${t.runner_kind}] (${t.project_id})${focus}\n   ${upd || '...'}${queued ? ` | fila: ${queued}` : ''} `;
     });
 
-    await sendMessage(phone, `📊 *Tasks recentes:*\n\n${lines.join('\n')}\n\nUse /task 1 para focar, ou /cancel 1 para cancelar.`);
+    const head = projectFilter ? `📊 *Tasks recentes (${projectFilter}):*` : '📊 *Tasks recentes:*';
+    await sendMessage(phone, `${head}\n\n${lines.join('\n')}\n\nUse /task 1 para focar, ou /cancel 1 para cancelar.`);
+    return true;
+  }
+
+  if (cmd === '/queue') {
+    const arg = parts[1];
+    const { taskId } = resolveTaskArgForPhone(phone, arg, { limit: 10 });
+    if (!taskId) {
+      await sendMessage(phone, '❌ Informe um taskId (ou use /status e depois /queue 1).');
+      return true;
+    }
+    const task = taskStore.getTask(taskId);
+    if (!task || task.phone !== phone) {
+      await sendMessage(phone, `❌ Task nao encontrada: *${taskId}*`);
+      return true;
+    }
+    const items = taskStore.listExecutionItems(taskId);
+    if (items.length === 0) {
+      await sendMessage(phone, `🧾 Fila vazia para *${taskId}*.`);
+      return true;
+    }
+    const lines = items.map((it, i) => `${i + 1}) id=${it.id} - ${String(it.content || '').slice(0, 400)}`);
+    await sendMessage(phone, `🧾 *Fila de execucao* (${taskId})\n\n${lines.join('\n')}`);
+    return true;
+  }
+
+  if (cmd === '/queue-edit') {
+    const taskArg = parts[1];
+    const itemId = parseInt(parts[2] || '', 10);
+    const nextText = rawText.replace(/^\/queue-edit\b/i, '').trim().split(/\s+/).slice(2).join(' ').trim();
+    if (!taskArg || !Number.isFinite(itemId) || !nextText) {
+      await sendMessage(phone, '❌ Use: /queue-edit <taskId|numero> <itemId> <texto>');
+      return true;
+    }
+    const { taskId } = resolveTaskArgForPhone(phone, taskArg, { limit: 10 });
+    const task = taskStore.getTask(taskId);
+    if (!task || task.phone !== phone) {
+      await sendMessage(phone, `❌ Task nao encontrada: *${taskId || taskArg}*`);
+      return true;
+    }
+    const ok = taskStore.updateExecutionItem(taskId, itemId, nextText);
+    if (!ok) {
+      await sendMessage(phone, `❌ Item da fila nao encontrado: *${itemId}*`);
+      return true;
+    }
+    await sendMessage(phone, `✅ Item *${itemId}* atualizado na fila da task *${taskId}*.`);
+    return true;
+  }
+
+  if (cmd === '/queue-del') {
+    const taskArg = parts[1];
+    const itemArg = (parts[2] || '').toLowerCase();
+    if (!taskArg || !itemArg) {
+      await sendMessage(phone, '❌ Use: /queue-del <taskId|numero> <itemId|all>');
+      return true;
+    }
+    const { taskId } = resolveTaskArgForPhone(phone, taskArg, { limit: 10 });
+    const task = taskStore.getTask(taskId);
+    if (!task || task.phone !== phone) {
+      await sendMessage(phone, `❌ Task nao encontrada: *${taskId || taskArg}*`);
+      return true;
+    }
+    if (itemArg === 'all') {
+      const removed = taskStore.clearExecutionItems(taskId);
+      await sendMessage(phone, `🗑️ Fila limpa para *${taskId}* (${removed} item(ns)).`);
+      return true;
+    }
+    const itemId = parseInt(itemArg, 10);
+    if (!Number.isFinite(itemId)) {
+      await sendMessage(phone, '❌ itemId invalido. Use um numero ou "all".');
+      return true;
+    }
+    const removed = taskStore.deleteExecutionItem(taskId, itemId);
+    if (!removed) {
+      await sendMessage(phone, `❌ Item da fila nao encontrado: *${itemId}*`);
+      return true;
+    }
+    await sendMessage(phone, `🗑️ Item *${itemId}* removido da fila da task *${taskId}*.`);
     return true;
   }
 
@@ -671,6 +774,33 @@ async function handleCommand(phone, rawText) {
     return true;
   }
 
+  if (cmd === '/task-policy') {
+    const rawLen = parts[1];
+    const rawHistory = parts[2];
+    if (!rawLen && !rawHistory) {
+      await sendMessage(
+        phone,
+        `🧩 Politica de tasks:\n` +
+        `• task_id_length: *${getTaskIdLength()}*\n` +
+        `• project_task_history_limit: *${getProjectTaskHistoryLimit()}*\n\n` +
+        `Use /task-policy <taskIdLen> <historyLimit> para alterar.`
+      );
+      return true;
+    }
+
+    const len = Number.parseInt(String(rawLen || ''), 10);
+    const history = Number.parseInt(String(rawHistory || ''), 10);
+    if (!Number.isFinite(len) || len < 1 || len > 8 || !Number.isFinite(history) || history < 1 || history > 500) {
+      await sendMessage(phone, '❌ Use: /task-policy <taskIdLen 1..8> <historyLimit 1..500>');
+      return true;
+    }
+
+    setSetting(SettingsKeys.taskIdLength, String(len));
+    setSetting(SettingsKeys.projectTaskHistoryLimit, String(history));
+    await sendMessage(phone, `✅ Politica atualizada: task_id_length=*${len}*, project_task_history_limit=*${history}*`);
+    return true;
+  }
+
   return false;
 }
 
@@ -850,7 +980,7 @@ async function processUserMessage(phone, text) {
     else if (selection.index != null) chosen = candidates[selection.index - 1] || null;
 
     if (!chosen) {
-      await sendMessage(phone, '❌ Selecao invalida. Responda com 1/2/3... ou task-xxxx.');
+      await sendMessage(phone, '❌ Selecao invalida. Responda com 1/2/3... ou com o taskId.');
       return;
     }
 
@@ -892,7 +1022,7 @@ async function processUserMessage(phone, text) {
       phone,
       `🧩 Voce tem ${active.length} tasks ativas. Qual usar para essa mensagem?\n\n` +
       `${lines.join('\n')}\n\n` +
-      `Responda com *1/2/3...* ou com o *task-xxxx*. (expira em ${Math.floor(config.pendingSelectionTtlMs / 1000)}s)`
+      `Responda com *1/2/3...* ou com o *taskId*. (expira em ${Math.floor(config.pendingSelectionTtlMs / 1000)}s)`
     );
     return;
   }
@@ -922,6 +1052,17 @@ async function routeToTask(phone, taskId, message) {
 
   taskStore.setUserFocusedTask(phone, task.task_id);
   taskStore.insertTaskMessage(task.task_id, 'user', message);
+
+  const activeRun = taskStore.getActiveRunForTask(task.task_id);
+  if (activeRun) {
+    const queued = taskStore.enqueueExecutionItem(task.task_id, message);
+    await sendMessage(
+      phone,
+      `🧾 Mensagem adicionada na fila da task *${task.task_id}* (item ${queued.id}, posicao ${queued.position}).\n` +
+      `Use /queue ${task.task_id} para ver/editar.`
+    );
+    return;
+  }
 
   const user = taskStore.getUser(phone);
   const globalRunnerDefault = (getRunnerDefault() || config.runnerDefault || 'codex-cli').toLowerCase();
@@ -1091,6 +1232,37 @@ async function routeToTask(phone, taskId, message) {
 
     taskStore.setUserOrchestratorOverride(phone, provider);
     await sendMessage(phone, `✅ Orchestrator atualizado: *${provider}*`);
+    return;
+  }
+
+  if (plan.action === 'set_task_policy') {
+    const len = plan.task_id_length != null ? Number.parseInt(String(plan.task_id_length), 10) : null;
+    const history = plan.project_task_history_limit != null
+      ? Number.parseInt(String(plan.project_task_history_limit), 10)
+      : null;
+
+    if (len == null && history == null) {
+      await sendMessage(phone, '❌ Planner retornou politica de task vazia.');
+      return;
+    }
+    if (len != null && (!Number.isFinite(len) || len < 1 || len > 8)) {
+      await sendMessage(phone, '❌ task_id_length invalido (use 1..8).');
+      return;
+    }
+    if (history != null && (!Number.isFinite(history) || history < 1 || history > 500)) {
+      await sendMessage(phone, '❌ project_task_history_limit invalido (use 1..500).');
+      return;
+    }
+
+    if (len != null) setSetting(SettingsKeys.taskIdLength, String(len));
+    if (history != null) setSetting(SettingsKeys.projectTaskHistoryLimit, String(history));
+
+    await sendMessage(
+      phone,
+      `✅ Politica de tasks atualizada:\n` +
+      `• task_id_length: *${getTaskIdLength()}*\n` +
+      `• project_task_history_limit: *${getProjectTaskHistoryLimit()}*`
+    );
     return;
   }
 
