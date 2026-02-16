@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-export const RunnerKindSchema = z.enum(['codex-cli', 'cursor-cli', 'gemini-cli', 'claude-cli', 'desktop-agent', 'auto']);
+export const RunnerKindSchema = z.string().trim().min(1);
 export const OrchestratorProviderSchema = z.enum(['gemini-cli', 'openrouter', 'auto']);
 export const PlanActionSchema = z.enum([
   'run',
