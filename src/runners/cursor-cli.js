@@ -1,3 +1,5 @@
+import { normalizeTokenUsage } from '../services/token-meter.js';
+
 export function buildCursorRun({ prompt, cwd, config }) {
   const command = config.cursor.command;
 
@@ -48,19 +50,21 @@ export function cursorParseLine({ obj, rawLine }) {
   }
 
   if (!obj || typeof obj !== 'object') return null;
+  const usage = normalizeTokenUsage(obj, 'provider');
 
   if (obj.type === 'system' && obj.subtype === 'init') {
     return {
       model: obj.model,
       sessionId: obj.session_id,
       updateText: 'init',
+      usage,
     };
   }
 
   if (obj.type === 'tool_call' && obj.tool_call) {
     const summary = summarizeToolCall(obj.tool_call);
     if (!summary) return null;
-    return { updateText: summary };
+    return { updateText: summary, usage };
   }
 
   if (obj.type === 'assistant') {
@@ -69,6 +73,7 @@ export function cursorParseLine({ obj, rawLine }) {
     return {
       updateText: `assistant: ${text.slice(0, 160)}`,
       assistantDelta: text + '\n',
+      usage,
     };
   }
 
@@ -78,8 +83,9 @@ export function cursorParseLine({ obj, rawLine }) {
     return {
       updateText: `result:${subtype || 'done'}`,
       finalResult: resultText || null,
+      usage,
     };
   }
 
-  return null;
+  return usage ? { usage } : null;
 }

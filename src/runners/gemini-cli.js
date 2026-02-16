@@ -1,3 +1,5 @@
+import { normalizeTokenUsage } from '../services/token-meter.js';
+
 export function buildGeminiRun({ prompt, config }) {
   const command = config.gemini.command;
 
@@ -17,19 +19,21 @@ export function buildGeminiRun({ prompt, config }) {
 
 export function geminiParseLine({ obj }) {
   if (!obj || typeof obj !== 'object') return null;
+  const usage = normalizeTokenUsage(obj, 'provider');
 
   if (obj.type === 'init') {
     return {
       model: obj.model,
       sessionId: obj.session_id,
       updateText: 'init',
+      usage,
     };
   }
 
   if (obj.type === 'tool_use') {
     const name = obj.tool_name || 'tool';
     const fp = obj.parameters?.file_path ? String(obj.parameters.file_path).split('/').pop() : '';
-    return { updateText: `tool:${name}${fp ? ` ${fp}` : ''}` };
+    return { updateText: `tool:${name}${fp ? ` ${fp}` : ''}`, usage };
   }
 
   if (obj.type === 'message' && obj.role === 'assistant' && typeof obj.content === 'string') {
@@ -38,13 +42,14 @@ export function geminiParseLine({ obj }) {
     return {
       updateText: `assistant: ${text.slice(0, 160)}`,
       assistantDelta: obj.delta ? obj.content : text + '\n',
+      usage,
     };
   }
 
   if (obj.type === 'result') {
     const status = obj.status || 'done';
-    return { updateText: `result:${status}` };
+    return { updateText: `result:${status}`, usage };
   }
 
-  return null;
+  return usage ? { usage } : null;
 }

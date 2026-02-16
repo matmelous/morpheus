@@ -8,6 +8,15 @@ import { planWithOpenRouter } from '../planner/openrouter.js';
 import { taskStore } from './task-store.js';
 import { getOrchestratorProviderDefault, getRunnerDefault } from './settings.js';
 import { projectManager } from './project-manager.js';
+import {
+  compactPlannerPayload,
+  estimateTokensFromText,
+  estimateUsage,
+  logBudgetCompaction,
+  logTokenUsage,
+  logUsageFallbackEstimate,
+  normalizeTokenUsage,
+} from './token-meter.js';
 
 const geminiCircuit = {
   untilMs: 0,
@@ -18,7 +27,6 @@ const geminiCircuit = {
 function classifyGeminiFailure(message) {
   const m = String(message || '').toLowerCase();
 
-  // Capacity / rate limiting
   if (
     m.includes('no capacity available') ||
     m.includes('resource_exhausted') ||
@@ -26,12 +34,11 @@ function classifyGeminiFailure(message) {
     m.includes('rate limit') ||
     m.includes('http 429') ||
     m.includes('status 429') ||
-    m.includes('exited with code') && m.includes('429')
+    (m.includes('exited with code') && m.includes('429'))
   ) {
     return { kind: 'capacity', cooldownMs: 10 * 60 * 1000 };
   }
 
-  // Quota / usage limit
   if (
     m.includes("you've hit your usage limit") ||
     m.includes('usage limit') ||
@@ -63,6 +70,33 @@ function shouldReplyAsGreeting(text) {
   ].includes(t);
 }
 
+function buildPlannerPromptPayload({
+  userMessage,
+  contextMessages,
+  taskId,
+  projectId,
+  defaultRunnerKind,
+  projects,
+  sharedMemory,
+}) {
+  const { system, user } = buildPlannerMessages({
+    userMessage,
+    contextMessages,
+    taskId,
+    projectId,
+    forcedRunnerKind: null,
+    defaultRunnerKind,
+    projects,
+    sharedMemory,
+  });
+
+  return {
+    system,
+    userPrompt: user,
+    estimatedInputTokens: estimateTokensFromText(`${system}\n\n${user}`),
+  };
+}
+
 export async function orchestrateTaskMessage({
   phone,
   task,
@@ -70,7 +104,7 @@ export async function orchestrateTaskMessage({
   preferredRunnerKind,
 }) {
   const user = taskStore.getUser(phone);
-  const sharedMemory = taskStore.getUserSharedMemory(phone)?.content || '';
+  const originalSharedMemory = taskStore.getUserSharedMemory(phone)?.content || '';
   const providerPref = normalizeProvider(user?.orchestrator_provider_override)
     || normalizeProvider(getOrchestratorProviderDefault())
     || normalizeProvider(config.orchestratorProvider)
@@ -83,20 +117,6 @@ export async function orchestrateTaskMessage({
     return String(v).toLowerCase();
   })();
 
-  const contextMessages = taskStore.listTaskMessages(task.task_id, config.plannerMaxContextMessages);
-
-  const { system, user: userPrompt } = buildPlannerMessages({
-    userMessage,
-    contextMessages,
-    taskId: task.task_id,
-    projectId: task.project_id,
-    forcedRunnerKind: null,
-    defaultRunnerKind, // preference only; planner may override (e.g. desktop-agent for GUI)
-    projects: projectManager.listProjects(),
-    sharedMemory,
-  });
-
-  // Cheap fast-path: handle pure greetings without calling a model.
   if (shouldReplyAsGreeting(userMessage)) {
     const reply = `Oi! Me diga o que voce quer fazer no projeto *${task.project_id}*.\n\n` +
       `Comandos uteis:\n` +
@@ -110,8 +130,68 @@ export async function orchestrateTaskMessage({
       plan: { version: 1, action: 'reply', reply_text: reply },
       providerUsed: 'local-heuristic',
       usedFallback: false,
+      tokenUsagePlanner: { inputTokens: 0, outputTokens: 0, totalTokens: 0, source: 'estimated' },
+      taskTokenTotals: taskStore.sumTokensByTask(task.task_id),
     };
   }
+
+  const taskTotalsBefore = taskStore.sumTokensByTask(task.task_id);
+  const plannerCallBudget = Math.max(1, Number(config.token.budgetPlannerPerCall || 12000));
+  const taskBudgetTotal = Math.max(plannerCallBudget, Number(config.token.budgetTaskTotal || 120000));
+  const taskBudgetRemaining = Math.max(0, taskBudgetTotal - Number(taskTotalsBefore?.totalTokens || 0));
+  const budgetBefore = Math.max(1, Math.min(plannerCallBudget, taskBudgetRemaining || plannerCallBudget));
+
+  const rawContextMessages = taskStore.listTaskMessages(task.task_id, config.plannerMaxContextMessages);
+  let effectiveContextMessages = rawContextMessages;
+  let effectiveSharedMemory = originalSharedMemory;
+
+  let promptPayload = buildPlannerPromptPayload({
+    userMessage,
+    contextMessages: effectiveContextMessages,
+    taskId: task.task_id,
+    projectId: task.project_id,
+    defaultRunnerKind,
+    projects: projectManager.listProjects(),
+    sharedMemory: effectiveSharedMemory,
+  });
+  const projectedBeforeCompaction = promptPayload.estimatedInputTokens;
+
+  let compactionMeta = null;
+  if (promptPayload.estimatedInputTokens > budgetBefore) {
+    const compacted = compactPlannerPayload({
+      contextMessages: rawContextMessages,
+      sharedMemory: originalSharedMemory,
+      plannerMaxContextMessages: config.plannerMaxContextMessages,
+      tokenBudgetPlannerPerCall: budgetBefore,
+      tokenBudgetSharedMemoryMax: config.token.budgetSharedMemoryMax,
+    });
+
+    effectiveContextMessages = compacted.contextMessages;
+    effectiveSharedMemory = compacted.sharedMemory;
+    compactionMeta = compacted.meta;
+
+    promptPayload = buildPlannerPromptPayload({
+      userMessage,
+      contextMessages: effectiveContextMessages,
+      taskId: task.task_id,
+      projectId: task.project_id,
+      defaultRunnerKind,
+      projects: projectManager.listProjects(),
+      sharedMemory: effectiveSharedMemory,
+    });
+
+    logBudgetCompaction({
+      task_id: task.task_id,
+      phone,
+      stage: 'planner',
+      budget_before: budgetBefore,
+      projected_before: projectedBeforeCompaction,
+      projected_after: promptPayload.estimatedInputTokens,
+      meta: compactionMeta,
+    });
+  }
+
+  const { system, userPrompt } = promptPayload;
 
   const providersToTry = [];
   const now = Date.now();
@@ -120,7 +200,6 @@ export async function orchestrateTaskMessage({
   if (providerPref === 'openrouter' || geminiInCooldown) {
     providersToTry.push('openrouter');
   } else {
-    // "gemini-cli" and "auto" both start with gemini-cli and fallback to openrouter.
     providersToTry.push('gemini-cli', 'openrouter');
   }
 
@@ -130,6 +209,7 @@ export async function orchestrateTaskMessage({
     try {
       let assistantText = '';
       let providerMeta = {};
+      let providerUsage = null;
 
       if (provider === 'gemini-cli') {
         const result = await planWithGeminiCli({
@@ -139,6 +219,7 @@ export async function orchestrateTaskMessage({
         });
         assistantText = result.assistantText;
         providerMeta = { model: result.model, sessionId: result.sessionId };
+        providerUsage = normalizeTokenUsage(result.usage, 'provider');
       } else if (provider === 'openrouter') {
         const result = await planWithOpenRouter({
           systemPrompt: system,
@@ -148,6 +229,7 @@ export async function orchestrateTaskMessage({
         });
         assistantText = result.assistantText;
         providerMeta = { model: result.model };
+        providerUsage = normalizeTokenUsage(result.usage || result.raw, 'provider');
       } else {
         throw new Error(`Unknown provider: ${provider}`);
       }
@@ -155,10 +237,60 @@ export async function orchestrateTaskMessage({
       const raw = parseFirstJsonObject(assistantText);
       let plan = validatePlan(raw);
 
-      // If runner_kind is missing, fall back to the default preference.
       if (plan.action === 'run') {
         if (!plan.runner_kind) plan = { ...plan, runner_kind: defaultRunnerKind };
       }
+
+      const finalUsage = providerUsage || estimateUsage({
+        inputText: `${system}\n\n${userPrompt}`,
+        outputText: assistantText,
+      });
+
+      if (!providerUsage) {
+        logUsageFallbackEstimate({
+          task_id: task.task_id,
+          stage: 'planner',
+          provider,
+          model: providerMeta.model || null,
+        });
+      }
+
+      const budgetAfter = Math.max(0, taskBudgetRemaining - Number(finalUsage.totalTokens || 0));
+      taskStore.insertTokenUsageEvent({
+        phone,
+        taskId: task.task_id,
+        runId: null,
+        stage: 'planner',
+        provider,
+        model: providerMeta.model || null,
+        inputTokens: finalUsage.inputTokens,
+        outputTokens: finalUsage.outputTokens,
+        totalTokens: finalUsage.totalTokens,
+        source: finalUsage.source || 'estimated',
+        budgetBefore,
+        budgetAfter,
+        compacted: Boolean(compactionMeta),
+        metaJson: JSON.stringify({ providersTried: providersToTry, providerErrors: errors, compactionMeta }),
+      });
+
+      const taskTokenTotals = taskStore.sumTokensByTask(task.task_id);
+      taskStore.updateTaskTokenTotals(task.task_id, taskTokenTotals);
+
+      logTokenUsage({
+        task_id: task.task_id,
+        run_id: null,
+        phone,
+        provider,
+        model: providerMeta.model || null,
+        stage: 'planner',
+        input_tokens: finalUsage.inputTokens,
+        output_tokens: finalUsage.outputTokens,
+        total_tokens: finalUsage.totalTokens,
+        source: finalUsage.source || 'estimated',
+        budget_before: budgetBefore,
+        budget_after: budgetAfter,
+        compacted: Boolean(compactionMeta),
+      });
 
       const firstProvider = providersToTry[0];
       return {
@@ -170,9 +302,10 @@ export async function orchestrateTaskMessage({
         circuitBreaker: (provider === 'openrouter' && geminiInCooldown)
           ? { geminiSkipUntilMs: geminiCircuit.untilMs, geminiSkipReason: geminiCircuit.reason }
           : null,
+        tokenUsagePlanner: finalUsage,
+        taskTokenTotals,
       };
     } catch (err) {
-      // If Gemini is consistently rate-limited/out-of-capacity, avoid paying the latency on every message.
       if (provider === 'gemini-cli') {
         const cls = classifyGeminiFailure(err?.message || String(err));
         if (cls) {
