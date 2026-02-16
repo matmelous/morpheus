@@ -1,4 +1,5 @@
 import { logger } from '../utils/logger.js';
+import { normalizeTokenUsage } from '../services/token-meter.js';
 
 export async function planWithOpenRouter({ systemPrompt, userPrompt, timeoutMs, config }) {
   const apiKey = config.openrouter.apiKey;
@@ -44,6 +45,7 @@ export async function planWithOpenRouter({ systemPrompt, userPrompt, timeoutMs, 
       provider: 'openrouter',
       model: json?.model || config.openrouter.model,
       assistantText: assistantText.trim(),
+      usage: normalizeTokenUsage(json, 'provider'),
       raw: json,
     };
   } catch (err) {

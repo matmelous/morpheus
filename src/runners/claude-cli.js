@@ -1,3 +1,5 @@
+import { normalizeTokenUsage } from '../services/token-meter.js';
+
 export function buildClaudeRun({ prompt, config }) {
   const command = config.claude.command;
 
@@ -64,25 +66,28 @@ function summarizeToolUseBlocks(blocks) {
 
 export function claudeParseLine({ obj }) {
   if (!obj || typeof obj !== 'object') return null;
+  const usage = normalizeTokenUsage(obj, 'provider');
 
   if (obj.type === 'system' && obj.subtype === 'init') {
     return {
       model: obj.model,
       sessionId: obj.session_id,
       updateText: 'init',
+      usage,
     };
   }
 
   if (obj.type === 'assistant') {
     const blocks = obj.message?.content;
     const toolSummary = summarizeToolUseBlocks(blocks);
-    if (toolSummary) return { updateText: toolSummary };
+    if (toolSummary) return { updateText: toolSummary, usage };
 
     const text = extractTextFromContentBlocks(blocks).trim();
     if (!text) return null;
     return {
       updateText: `assistant: ${text.slice(0, 160)}`,
       assistantDelta: text + '\n',
+      usage,
     };
   }
 
@@ -92,8 +97,9 @@ export function claudeParseLine({ obj }) {
     return {
       updateText: `result:${subtype || 'done'}`,
       finalResult: resultText || null,
+      usage,
     };
   }
 
-  return null;
+  return usage ? { usage } : null;
 }

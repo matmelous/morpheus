@@ -2,6 +2,7 @@ import { spawn } from 'child_process';
 import readline from 'readline';
 import { logger } from '../utils/logger.js';
 import { parseFirstJsonObject } from './json.js';
+import { mergeTokenUsage, normalizeTokenUsage } from '../services/token-meter.js';
 
 function safeJsonParse(line) {
   try {
@@ -31,6 +32,7 @@ export async function planWithGeminiCli({ promptText, timeoutMs, config }) {
     let sessionId = null;
     let assistant = '';
     let stderr = '';
+    let usage = null;
 
     const rl = readline.createInterface({ input: child.stdout });
     rl.on('line', (line) => {
@@ -47,6 +49,8 @@ export async function planWithGeminiCli({ promptText, timeoutMs, config }) {
         if (obj.delta) assistant += obj.content;
         else assistant += obj.content + '\n';
       }
+      const u = normalizeTokenUsage(obj, 'provider');
+      if (u) usage = mergeTokenUsage(usage, u);
     });
 
     child.stderr.on('data', (d) => {
@@ -92,6 +96,7 @@ export async function planWithGeminiCli({ promptText, timeoutMs, config }) {
               model,
               sessionId,
               assistantText,
+              usage,
               stderr: stderr.trim(),
               exitCode,
             });
@@ -107,6 +112,7 @@ export async function planWithGeminiCli({ promptText, timeoutMs, config }) {
         model,
         sessionId,
         assistantText: assistant.trim(),
+        usage,
         stderr: stderr.trim(),
         exitCode,
       });

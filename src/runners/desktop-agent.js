@@ -1,4 +1,5 @@
 import { resolve } from 'path';
+import { normalizeTokenUsage } from '../services/token-meter.js';
 
 export function buildDesktopAgentRun({ prompt, cwd, artifactsDir }) {
   const scriptPath = resolve(process.cwd(), 'src', 'runners', 'desktop-agent-run.js');
@@ -12,15 +13,17 @@ export function desktopAgentParseLine({ obj, rawLine }) {
   // Runner writes JSONL. We keep parsing permissive so we can stream updates.
   const o = obj && typeof obj === 'object' ? obj : null;
   if (!o) return null;
+  const usage = normalizeTokenUsage(o, 'provider');
 
-  if (o.type === 'model' && o.model) return { model: String(o.model), updateText: `model: ${String(o.model).slice(0, 80)}` };
-  if (o.type === 'update' && o.text) return { updateText: String(o.text).slice(0, 500) };
+  if (o.type === 'model' && o.model) return { model: String(o.model), updateText: `model: ${String(o.model).slice(0, 80)}`, usage };
+  if (o.type === 'update' && o.text) return { updateText: String(o.text).slice(0, 500), usage };
 
   if (o.type === 'blocked') {
     return {
       blockedReason: String(o.reason || o.blockedReason || 'blocked'),
       updateText: `blocked: ${String(o.reason || o.blockedReason || 'blocked').slice(0, 80)}`,
       finalResult: o.summary || o.message || null,
+      usage,
     };
   }
 
@@ -30,11 +33,11 @@ export function desktopAgentParseLine({ obj, rawLine }) {
       updateText: 'final',
       assistantDelta: text ? String(text) + '\n' : null,
       finalResult: text ? String(text) : null,
+      usage,
     };
   }
 
   // Fallback for debugging unknown lines
-  if (rawLine && rawLine.length < 200) return { updateText: `event: ${rawLine}` };
-  return null;
+  if (rawLine && rawLine.length < 200) return { updateText: `event: ${rawLine}`, usage };
+  return usage ? { usage } : null;
 }
-

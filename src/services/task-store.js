@@ -233,6 +233,9 @@ class TaskStore {
       'runner_kind',
       'project_id',
       'cwd',
+      'total_input_tokens',
+      'total_output_tokens',
+      'total_tokens',
     ];
 
     const keys = Object.keys(updates).filter((k) => allowed.includes(k));
@@ -316,6 +319,9 @@ class TaskStore {
       'command',
       'model',
       'session_id',
+      'input_tokens',
+      'output_tokens',
+      'total_tokens',
     ];
     const keys = Object.keys(updates).filter((k) => allowed.includes(k));
     if (keys.length === 0) return;
@@ -406,6 +412,86 @@ class TaskStore {
     });
     tx(doomed);
     return doomed.length;
+  }
+
+  insertTokenUsageEvent({
+    phone,
+    taskId,
+    runId = null,
+    stage,
+    provider,
+    model = null,
+    inputTokens = 0,
+    outputTokens = 0,
+    totalTokens = 0,
+    source = 'estimated',
+    budgetBefore = null,
+    budgetAfter = null,
+    compacted = false,
+    metaJson = null,
+  }) {
+    this.db.prepare(`
+      INSERT INTO token_usage_events
+        (created_at, phone, task_id, run_id, stage, provider, model, input_tokens, output_tokens, total_tokens, source, budget_before, budget_after, compacted, meta_json)
+      VALUES
+        (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      nowIso(),
+      String(phone),
+      String(taskId),
+      runId ? String(runId) : null,
+      String(stage || 'unknown'),
+      String(provider || 'unknown'),
+      model ? String(model) : null,
+      Number(inputTokens) || 0,
+      Number(outputTokens) || 0,
+      Number(totalTokens) || 0,
+      String(source || 'estimated'),
+      budgetBefore == null ? null : Number(budgetBefore),
+      budgetAfter == null ? null : Number(budgetAfter),
+      compacted ? 1 : 0,
+      metaJson ? String(metaJson) : null
+    );
+  }
+
+  sumTokensByTask(taskId) {
+    return this.db.prepare(`
+      SELECT
+        COALESCE(SUM(input_tokens), 0) AS inputTokens,
+        COALESCE(SUM(output_tokens), 0) AS outputTokens,
+        COALESCE(SUM(total_tokens), 0) AS totalTokens
+      FROM token_usage_events
+      WHERE task_id = ?
+    `).get(taskId);
+  }
+
+  sumTokensByRun(runId) {
+    return this.db.prepare(`
+      SELECT
+        COALESCE(SUM(input_tokens), 0) AS inputTokens,
+        COALESCE(SUM(output_tokens), 0) AS outputTokens,
+        COALESCE(SUM(total_tokens), 0) AS totalTokens
+      FROM token_usage_events
+      WHERE run_id = ?
+    `).get(runId);
+  }
+
+  updateRunTokenTotals(runId, totals) {
+    const t = totals || {};
+    this.updateRun(runId, {
+      input_tokens: Number(t.inputTokens) || 0,
+      output_tokens: Number(t.outputTokens) || 0,
+      total_tokens: Number(t.totalTokens) || 0,
+    });
+  }
+
+  updateTaskTokenTotals(taskId, totals) {
+    const t = totals || {};
+    this.updateTask(taskId, {
+      total_input_tokens: Number(t.inputTokens) || 0,
+      total_output_tokens: Number(t.outputTokens) || 0,
+      total_tokens: Number(t.totalTokens) || 0,
+    });
   }
 }
 

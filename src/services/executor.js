@@ -9,6 +9,14 @@ import { spawnStreamingProcess } from '../utils/spawn.js';
 import { getRunner } from '../runners/index.js';
 import { taskStore } from './task-store.js';
 import { sendImage, sendMessage } from './whatsapp.js';
+import {
+  estimateUsage,
+  formatTokenSummaryLine,
+  logTokenUsage,
+  logUsageFallbackEstimate,
+  mergeTokenUsage,
+  normalizeTokenUsage,
+} from './token-meter.js';
 
 function nowIso() {
   return new Date().toISOString();
@@ -260,6 +268,7 @@ class Executor {
       sessionId: null,
       finalResult: null,
       assistantBuffer: '',
+      usage: null,
     };
     const maxAssistantBufferChars = 120_000;
 
@@ -299,6 +308,7 @@ class Executor {
 
         const parsed = runner.parseLine?.({ obj, rawLine: line, state }) || null;
         if (parsed?.blockedReason && !blockedReason) blockedReason = parsed.blockedReason;
+        if (parsed?.usage) state.usage = mergeTokenUsage(state.usage, normalizeTokenUsage(parsed.usage, 'provider'));
 
         if (parsed?.model && !state.model) {
           state.model = parsed.model;
@@ -409,6 +419,56 @@ class Executor {
       const summary = await this.readSummaryForRun(run.runner_kind, runSpec, run.artifacts_dir, state);
       writeText(summaryPath, summary || '');
 
+      const providerUsage = normalizeTokenUsage(state.usage, 'provider');
+      const runUsage = providerUsage || estimateUsage({
+        inputText: String(run.prompt || ''),
+        outputText: String(summary || state.assistantBuffer || ''),
+      });
+      if (!providerUsage) {
+        logUsageFallbackEstimate({
+          task_id: task.task_id,
+          run_id: run.run_id,
+          stage: 'runner',
+          provider: run.runner_kind,
+          model: state.model || null,
+        });
+      }
+
+      taskStore.insertTokenUsageEvent({
+        phone,
+        taskId: task.task_id,
+        runId: run.run_id,
+        stage: 'runner',
+        provider: run.runner_kind,
+        model: state.model || null,
+        inputTokens: runUsage.inputTokens,
+        outputTokens: runUsage.outputTokens,
+        totalTokens: runUsage.totalTokens,
+        source: runUsage.source || 'estimated',
+        budgetBefore: null,
+        budgetAfter: null,
+        compacted: false,
+        metaJson: JSON.stringify({ runnerKind: run.runner_kind }),
+      });
+
+      const runTokenTotals = taskStore.sumTokensByRun(run.run_id);
+      const taskTokenTotals = taskStore.sumTokensByTask(task.task_id);
+      taskStore.updateRunTokenTotals(run.run_id, runTokenTotals);
+      taskStore.updateTaskTokenTotals(task.task_id, taskTokenTotals);
+
+      logTokenUsage({
+        task_id: task.task_id,
+        run_id: run.run_id,
+        phone,
+        provider: run.runner_kind,
+        model: state.model || null,
+        stage: 'runner',
+        input_tokens: runUsage.inputTokens,
+        output_tokens: runUsage.outputTokens,
+        total_tokens: runUsage.totalTokens,
+        source: runUsage.source || 'estimated',
+      });
+
       writeJson(metaPath, {
         ...safeJsonParse(readFileSync(metaPath, 'utf-8')) || {},
         endedAt,
@@ -474,6 +534,8 @@ class Executor {
             phone,
             `⛔ *Confirmacao necessaria (compra)* (${task.project_id})\n` +
             `Task: *${task.task_id}*\n` +
+            `${formatTokenSummaryLine('Tokens run', runTokenTotals)}\n` +
+            `Tokens task acumulado: ${Number(taskTokenTotals?.totalTokens || 0)}\n` +
             `Responda com *CONFIRMO COMPRA* ou envie */confirm* em ate 10 min para continuar.`
           );
 
@@ -493,6 +555,8 @@ class Executor {
             `Task: *${task.task_id}*\n` +
             `Runner: *${run.runner_kind}*\n` +
             `${state.model ? `Model: *${state.model}*\n` : ''}` +
+            `${formatTokenSummaryLine('Tokens run', runTokenTotals)}\n` +
+            `Tokens task acumulado: ${Number(taskTokenTotals?.totalTokens || 0)}\n` +
             `Motivo: *${blockedReason || 'unknown'}*`
           );
         }
@@ -503,6 +567,8 @@ class Executor {
           `Task: *${task.task_id}*\n` +
           `Runner: *${run.runner_kind}*\n\n` +
           `${state.model ? `Model: *${state.model}*\n\n` : ''}` +
+          `${formatTokenSummaryLine('Tokens run', runTokenTotals)}\n` +
+          `Tokens task acumulado: ${Number(taskTokenTotals?.totalTokens || 0)}\n\n` +
           `${truncate(summary || '(sem resumo)', 3500)}`
         );
 
@@ -531,6 +597,8 @@ class Executor {
           `Task: *${task.task_id}*\n` +
           `Runner: *${run.runner_kind}*\n` +
           `${state.model ? `Model: *${state.model}*\n` : ''}` +
+          `${formatTokenSummaryLine('Tokens run', runTokenTotals)}\n` +
+          `Tokens task acumulado: ${Number(taskTokenTotals?.totalTokens || 0)}\n` +
           `Exit: *${exitCode}*\n` +
           `${lastLog ? `Ultimo log: ${truncate(lastLog, 800)}\n` : ''}` +
           `Artefatos: ${run.artifacts_dir}`
@@ -630,7 +698,8 @@ class Executor {
         const startedAt = t.started_at ? new Date(t.started_at).getTime() : Date.now();
         const elapsed = formatElapsed((Date.now() - startedAt) / 1000);
         const upd = (t.last_update || '').toString().slice(0, 160);
-        return `${i + 1}) *${t.task_id}* [${t.runner_kind}] (${t.project_id}) ${elapsed}\n   ${upd || '...'} `;
+        const totalTokens = Number(t.total_tokens || 0);
+        return `${i + 1}) *${t.task_id}* [${t.runner_kind}] (${t.project_id}) ${elapsed}\n   ${upd || '...'}\n   tokens: ${totalTokens}`;
       });
 
       await sendMessage(

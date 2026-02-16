@@ -18,6 +18,7 @@ import {
 } from '../services/settings.js';
 import { executor } from '../services/executor.js';
 import { orchestrateTaskMessage } from '../services/orchestrator.js';
+import { formatTokenSummaryLine } from '../services/token-meter.js';
 import { extFromMime, safeFileName, buildCanonicalMediaMessage } from '../services/media-utils.js';
 import { transcribeAudioFile } from '../services/transcription.js';
 import { describeImage } from '../services/vision.js';
@@ -1118,6 +1119,13 @@ async function routeToTask(phone, taskId, message) {
   if (!orchestration?.usedFallback && orchestration?.circuitBreaker?.geminiSkipReason) {
     const reason = orchestration.circuitBreaker.geminiSkipReason;
     await sendMessage(phone, `ℹ️ Planner pulou gemini-cli (cooldown por ${reason}). Usando *${orchestration.providerUsed}*.`);
+  }
+  if (config.token.notificationLevel === 'summary' && orchestration?.tokenUsagePlanner) {
+    await sendMessage(
+      phone,
+      `🧮 ${formatTokenSummaryLine('Tokens planner', orchestration.tokenUsagePlanner)}\n` +
+      `Tokens task acumulado: ${Number(orchestration?.taskTokenTotals?.totalTokens || 0)}`
+    );
   }
 
   const plan = orchestration?.plan;

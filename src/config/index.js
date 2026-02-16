@@ -11,6 +11,8 @@ const appRoot = resolve(__dirname, '../..');
 
 const RunnerKindSchema = z.enum(['codex-cli', 'cursor-cli', 'gemini-cli', 'claude-cli', 'desktop-agent', 'auto']);
 const OrchestratorProviderSchema = z.enum(['gemini-cli', 'openrouter', 'auto']);
+const TokenEstimatorModeSchema = z.enum(['provider_fallback_estimate']);
+const TokenNotificationLevelSchema = z.enum(['summary']);
 
 const EnvSchema = z.object({
   APP_PORT: z.coerce.number().int().positive().default(3200),
@@ -71,6 +73,11 @@ const EnvSchema = z.object({
 
   PLANNER_TIMEOUT_MS: z.coerce.number().int().positive().default(120000),
   PLANNER_MAX_CONTEXT_MESSAGES: z.coerce.number().int().positive().default(12),
+  TOKEN_BUDGET_PLANNER_PER_CALL: z.coerce.number().int().positive().default(12000),
+  TOKEN_BUDGET_TASK_TOTAL: z.coerce.number().int().positive().default(120000),
+  TOKEN_BUDGET_SHARED_MEMORY_MAX: z.coerce.number().int().positive().default(3000),
+  TOKEN_ESTIMATOR_MODE: TokenEstimatorModeSchema.optional().default('provider_fallback_estimate'),
+  TOKEN_NOTIFICATION_LEVEL: TokenNotificationLevelSchema.optional().default('summary'),
 
   SQLITE_DB_PATH: z.string().optional().default('./data/pmi.sqlite'),
   RUNS_DIR: z.string().optional().default('./runs'),
@@ -157,6 +164,13 @@ export const config = {
 
   plannerTimeoutMs: env.PLANNER_TIMEOUT_MS,
   plannerMaxContextMessages: env.PLANNER_MAX_CONTEXT_MESSAGES,
+  token: {
+    budgetPlannerPerCall: env.TOKEN_BUDGET_PLANNER_PER_CALL,
+    budgetTaskTotal: env.TOKEN_BUDGET_TASK_TOTAL,
+    budgetSharedMemoryMax: env.TOKEN_BUDGET_SHARED_MEMORY_MAX,
+    estimatorMode: env.TOKEN_ESTIMATOR_MODE,
+    notificationLevel: env.TOKEN_NOTIFICATION_LEVEL,
+  },
 
   sqliteDbPath: resolve(appRoot, env.SQLITE_DB_PATH),
   runsDir: resolve(appRoot, env.RUNS_DIR),
