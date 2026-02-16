@@ -10,6 +10,7 @@ export const PlanActionSchema = z.enum([
   'set_project',
   'set_runner',
   'set_orchestrator',
+  'set_task_policy',
   'memory_append',
   'memory_set',
   'memory_clear',
@@ -42,6 +43,10 @@ export const PlanSchema = z.object({
 
   // action=set_orchestrator
   provider: OrchestratorProviderSchema.optional(),
+
+  // action=set_task_policy
+  task_id_length: z.coerce.number().int().positive().optional(),
+  project_task_history_limit: z.coerce.number().int().positive().optional(),
 
   // action=project_add
   id: z.string().optional(),
@@ -78,6 +83,10 @@ export function validatePlan(raw) {
     if (!plan.runner_kind) throw new Error('Invalid plan: runner_kind is required for action=set_runner');
   } else if (plan.action === 'set_orchestrator') {
     if (!plan.provider) throw new Error('Invalid plan: provider is required for action=set_orchestrator');
+  } else if (plan.action === 'set_task_policy') {
+    if (plan.task_id_length == null && plan.project_task_history_limit == null) {
+      throw new Error('Invalid plan: task_id_length or project_task_history_limit is required for action=set_task_policy');
+    }
   } else if (plan.action === 'project_add') {
     if (!plan.id || !String(plan.id).trim()) throw new Error('Invalid plan: id is required for action=project_add');
     if (!plan.cwd || !String(plan.cwd).trim()) throw new Error('Invalid plan: cwd is required for action=project_add');

@@ -1,6 +1,6 @@
 const PLAN_SCHEMA = `{
   "version": 1,
-  "action": "run" | "reply" | "set_project" | "set_runner" | "set_orchestrator" | "memory_append" | "memory_set" | "memory_clear" | "memory_show" | "project_add" | "project_mkdir" | "project_clone" | "project_scan",
+  "action": "run" | "reply" | "set_project" | "set_runner" | "set_orchestrator" | "set_task_policy" | "memory_append" | "memory_set" | "memory_clear" | "memory_show" | "project_add" | "project_mkdir" | "project_clone" | "project_scan",
 
   // when action = "reply"
   "reply_text": string,
@@ -20,6 +20,10 @@ const PLAN_SCHEMA = `{
   // when action = "set_orchestrator"
   "provider": "gemini-cli" | "openrouter" | "auto",
   "scope"?: "user" | "global",
+
+  // when action = "set_task_policy"
+  "task_id_length"?: number,
+  "project_task_history_limit"?: number,
 
   // when action = "project_add"
   "id": string,
@@ -104,6 +108,7 @@ export function buildPlannerMessages({
     '- Trocar de projeto: use action="set_project" (nao use action="run").',
     '- Trocar runner: use action="set_runner" (scope "task" quando for so para esta task; "user" para preferencia do usuario; "global" apenas se o usuario for admin).',
     '- Trocar orchestrator/planner: use action="set_orchestrator" (scope "user" ou "global").',
+    '- Alterar politica de tasks (tamanho do task_id e limite de historico por projeto): use action="set_task_policy".',
     '- Memoria compartilhada: use action="memory_append" para adicionar uma preferencia/definicao; use action="memory_set" para substituir toda memoria; use action="memory_clear" para limpar; use action="memory_show" para mostrar.',
     '- Criar/registrar projetos (admin): use action="project_mkdir" / "project_clone" / "project_add" / "project_scan".',
     '- Para project_mkdir/project_clone: prefira `dir` relativo ao DEVELOPMENT_ROOT, mas path absoluto tambem e permitido se o usuario pediu.',

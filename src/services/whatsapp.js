@@ -9,18 +9,24 @@ import {
   makeWASocket,
   useMultiFileAuthState,
 } from '@whiskeysockets/baileys';
+import qrcodeTerminal from 'qrcode-terminal';
 
 import { config } from '../config/index.js';
 import { logger } from '../utils/logger.js';
 
 const MAX_MESSAGE_LENGTH = 4000;
 const RECONNECT_DELAY_MS = 5000;
+const READY_BROADCAST_MESSAGE =
+  'Estou pronto. O projeto morpheus está ativo e os arquivos parecem estar no lugar.\n' +
+  'Como posso ajudar?\n' +
+  'Dica: utilize comandos como /help ou /status para começar';
 
 let socket = null;
 let startupPromise = null;
 let reconnectTimer = null;
 let stopRequested = false;
 let inboundMessageHandler = null;
+let readyBroadcastSent = false;
 
 function splitMessage(text, maxLength = MAX_MESSAGE_LENGTH) {
   if (text.length <= maxLength) return [text];
@@ -238,6 +244,7 @@ async function createSocket() {
   nextSocket.ev.on('messages.upsert', handleInboundUpsert);
   nextSocket.ev.on('connection.update', ({ connection, lastDisconnect, qr }) => {
     if (qr) {
+      qrcodeTerminal.generate(qr, { small: true });
       const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=320x320&data=${encodeURIComponent(qr)}`;
       logger.warn(
         { qr, qrUrl },
@@ -248,6 +255,19 @@ async function createSocket() {
     if (connection === 'open') {
       clearReconnectTimer();
       logger.info({ me: nextSocket.user?.id || null }, 'WhatsApp socket connected');
+
+      if (!readyBroadcastSent) {
+        readyBroadcastSent = true;
+        void (async () => {
+          for (const phone of config.allowedPhoneNumbers) {
+            try {
+              await nextSocket.sendMessage(toJid(phone), { text: READY_BROADCAST_MESSAGE });
+            } catch (err) {
+              logger.error({ phone, error: err?.message }, 'Failed to send readiness message');
+            }
+          }
+        })();
+      }
       return;
     }
 

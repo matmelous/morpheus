@@ -539,6 +539,32 @@ class Executor {
         await trySendFailureScreenshot(phone, run.artifacts_dir);
       }
 
+      // Execute next queued user message for this task (if any), after current run finishes.
+      if (status === 'done' || status === 'error' || status === 'cancelled') {
+        const nextQueued = taskStore.popNextExecutionItem(task.task_id);
+        if (nextQueued?.content) {
+          const latestTask = taskStore.getTask(task.task_id);
+          if (latestTask && latestTask.phone === phone) {
+            const mem = taskStore.getUserSharedMemory(phone)?.content || '';
+            const queuedPrompt = String(nextQueued.content).trim();
+            const prompt = mem && mem.trim()
+              ? `[MEMORIA COMPARTILHADA]\n${mem.trim()}\n\n[PROMPT]\n${queuedPrompt}`
+              : queuedPrompt;
+
+            await sendMessage(
+              phone,
+              `▶️ Retomando fila da task *${task.task_id}* (item ${nextQueued.id}).`
+            );
+            await this.enqueueTaskRun({
+              phone,
+              task: latestTask,
+              prompt,
+              runnerKind: latestTask.runner_kind || run.runner_kind,
+            });
+          }
+        }
+      }
+
       // Start next queued work if any.
       this.tick().catch((err) => logger.error({ error: err?.message }, 'tick after close failed'));
     });

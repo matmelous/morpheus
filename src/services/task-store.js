@@ -1,9 +1,12 @@
 import { getDb } from '../db/index.js';
 import { makeId } from '../utils/ids.js';
+import { getProjectTaskHistoryLimit, getTaskIdLength } from './settings.js';
 
 function nowIso() {
   return new Date().toISOString();
 }
+
+const TASK_ID_CHARS = 'abcdefghijklmnopqrstuvwxyz0123456789';
 
 class TaskStore {
   constructor() {
@@ -152,7 +155,7 @@ class TaskStore {
   createTask({ phone, projectId, cwd, runnerKind, title }) {
     this.ensureUser(phone);
 
-    const taskId = makeId('task');
+    const taskId = this._allocateTaskId();
     const createdAt = nowIso();
 
     this.db.prepare(`
@@ -160,17 +163,49 @@ class TaskStore {
       VALUES (?, ?, ?, ?, ?, 'waiting', ?, ?, NULL, NULL, 'Waiting', NULL)
     `).run(taskId, phone, projectId, cwd, runnerKind, title || null, createdAt);
 
+    this.pruneOldTasksByProject(projectId, getProjectTaskHistoryLimit());
     return this.getTask(taskId);
+  }
+
+  _allocateTaskId() {
+    const taskIdLength = getTaskIdLength();
+    const capacity = TASK_ID_CHARS.length ** taskIdLength;
+    const maxAttempts = 256;
+    for (let i = 0; i < maxAttempts; i++) {
+      let id = '';
+      for (let j = 0; j < taskIdLength; j++) {
+        const idx = Math.floor(Math.random() * TASK_ID_CHARS.length);
+        id += TASK_ID_CHARS[idx];
+      }
+      const exists = this.db.prepare('SELECT 1 FROM tasks WHERE task_id = ? LIMIT 1').get(id);
+      if (!exists) return id;
+    }
+
+    // Fallback to deterministic scan when random attempts miss due to high occupancy.
+    for (let n = 0; n < capacity; n++) {
+      let rem = n;
+      let id = '';
+      for (let j = 0; j < taskIdLength; j++) {
+        id = TASK_ID_CHARS[rem % TASK_ID_CHARS.length] + id;
+        rem = Math.floor(rem / TASK_ID_CHARS.length);
+      }
+      const exists = this.db.prepare('SELECT 1 FROM tasks WHERE task_id = ? LIMIT 1').get(id);
+      if (!exists) return id;
+    }
+    throw new Error('Could not allocate task id (task id space exhausted)');
   }
 
   getTask(taskId) {
     return this.db.prepare('SELECT * FROM tasks WHERE task_id = ?').get(taskId) || null;
   }
 
-  listTasksByPhone(phone, { limit = 20 } = {}) {
-    return this.db.prepare(
-      'SELECT * FROM tasks WHERE phone = ? ORDER BY created_at DESC LIMIT ?'
-    ).all(phone, limit);
+  listTasksByPhone(phone, { limit = 20, projectId = null } = {}) {
+    if (projectId) {
+      return this.db.prepare(
+        'SELECT * FROM tasks WHERE phone = ? AND project_id = ? ORDER BY created_at DESC LIMIT ?'
+      ).all(phone, projectId, limit);
+    }
+    return this.db.prepare('SELECT * FROM tasks WHERE phone = ? ORDER BY created_at DESC LIMIT ?').all(phone, limit);
   }
 
   listActiveTasksByPhone(phone) {
@@ -303,6 +338,74 @@ class TaskStore {
       SET status = 'error', ended_at = ?, last_error = COALESCE(last_error, 'Orchestrator restarted while task was running.')
       WHERE status = 'running'
     `).run(endedAt);
+  }
+
+  enqueueExecutionItem(taskId, content) {
+    const now = nowIso();
+    this.db.prepare(`
+      INSERT INTO task_execution_queue (task_id, content, created_at, updated_at)
+      VALUES (?, ?, ?, ?)
+    `).run(taskId, String(content || '').trim(), now, now);
+
+    const row = this.db.prepare(
+      'SELECT id, task_id, content, created_at, updated_at FROM task_execution_queue WHERE task_id = ? ORDER BY id DESC LIMIT 1'
+    ).get(taskId);
+    const position = this.db.prepare('SELECT COUNT(1) AS n FROM task_execution_queue WHERE task_id = ?').get(taskId)?.n || 0;
+    return { ...row, position };
+  }
+
+  listExecutionItems(taskId) {
+    return this.db.prepare(
+      'SELECT id, task_id, content, created_at, updated_at FROM task_execution_queue WHERE task_id = ? ORDER BY id ASC'
+    ).all(taskId);
+  }
+
+  updateExecutionItem(taskId, itemId, content) {
+    const info = this.db.prepare(
+      'UPDATE task_execution_queue SET content = ?, updated_at = ? WHERE task_id = ? AND id = ?'
+    ).run(String(content || '').trim(), nowIso(), taskId, itemId);
+    return info.changes > 0;
+  }
+
+  deleteExecutionItem(taskId, itemId) {
+    const info = this.db.prepare('DELETE FROM task_execution_queue WHERE task_id = ? AND id = ?').run(taskId, itemId);
+    return info.changes > 0;
+  }
+
+  clearExecutionItems(taskId) {
+    return this.db.prepare('DELETE FROM task_execution_queue WHERE task_id = ?').run(taskId).changes;
+  }
+
+  popNextExecutionItem(taskId) {
+    const row = this.db.prepare(
+      'SELECT id, task_id, content, created_at, updated_at FROM task_execution_queue WHERE task_id = ? ORDER BY id ASC LIMIT 1'
+    ).get(taskId);
+    if (!row) return null;
+    this.db.prepare('DELETE FROM task_execution_queue WHERE id = ?').run(row.id);
+    return row;
+  }
+
+  pruneOldTasksByProject(projectId, keep = 15) {
+    if (!projectId || keep < 1) return 0;
+    const doomed = this.db.prepare(`
+      SELECT task_id
+      FROM tasks
+      WHERE project_id = ? AND status IN ('done','error','cancelled')
+      ORDER BY created_at DESC
+      LIMIT -1 OFFSET ?
+    `).all(projectId, keep);
+    if (!doomed.length) return 0;
+
+    const delTask = this.db.prepare('DELETE FROM tasks WHERE task_id = ?');
+    const delQueue = this.db.prepare('DELETE FROM task_execution_queue WHERE task_id = ?');
+    const tx = this.db.transaction((rows) => {
+      for (const row of rows) {
+        delQueue.run(row.task_id);
+        delTask.run(row.task_id);
+      }
+    });
+    tx(doomed);
+    return doomed.length;
   }
 }
 

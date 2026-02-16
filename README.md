@@ -20,12 +20,9 @@ Permissoes do macOS:
 
 ## Setup rapido
 
-1. Copie `.env.example` para `.env`.
-2. Configure pelo menos:
-- `ALLOWED_PHONE_NUMBERS`
-- `ADMIN_PHONE_NUMBERS`
-- `DEFAULT_PROJECT_ID`
-3. Rode `npm run dev`.
+1. Rode `npm run init:projects` e informe path, nome, type e um numero permitido (allowlist).
+2. O script cria `projects.json`, cria/atualiza `.env` e inicia o servidor (`npm run dev`) automaticamente.
+3. Ajuste no `.env` o que faltar (ex.: `ADMIN_PHONE_NUMBERS`).
 4. No primeiro start, o Baileys vai logar um QR no terminal (`connection.update.qr`). Escaneie em WhatsApp > Linked Devices.
 
 Os arquivos de sessao do WhatsApp ficam em `WHATSAPP_AUTH_DIR` (default: `./data/whatsapp-auth`).
