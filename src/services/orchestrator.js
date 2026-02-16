@@ -5,6 +5,7 @@ import { validatePlan } from '../planner/schema.js';
 import { buildPlannerMessages } from '../planner/prompt.js';
 import { planWithGeminiCli } from '../planner/gemini-cli.js';
 import { planWithOpenRouter } from '../planner/openrouter.js';
+import { isRunnerKindSupported, listSupportedRunnerKinds } from '../runners/index.js';
 import { taskStore } from './task-store.js';
 import { getOrchestratorProviderDefault, getRunnerDefault } from './settings.js';
 import { projectManager } from './project-manager.js';
@@ -76,6 +77,7 @@ function buildPlannerPromptPayload({
   taskId,
   projectId,
   defaultRunnerKind,
+  runnerKinds,
   projects,
   sharedMemory,
 }) {
@@ -86,6 +88,7 @@ function buildPlannerPromptPayload({
     projectId,
     forcedRunnerKind: null,
     defaultRunnerKind,
+    runnerKinds,
     projects,
     sharedMemory,
   });
@@ -114,7 +117,8 @@ export async function orchestrateTaskMessage({
   const defaultRunnerKind = (() => {
     const v = (preferredRunnerKind && preferredRunnerKind !== 'auto') ? preferredRunnerKind : globalRunnerDefault;
     if (!v || v === 'auto') return 'codex-cli';
-    return String(v).toLowerCase();
+    const normalized = String(v).toLowerCase();
+    return isRunnerKindSupported(normalized) ? normalized : 'codex-cli';
   })();
 
   if (shouldReplyAsGreeting(userMessage)) {
@@ -151,6 +155,7 @@ export async function orchestrateTaskMessage({
     taskId: task.task_id,
     projectId: task.project_id,
     defaultRunnerKind,
+    runnerKinds: listSupportedRunnerKinds({ includeAuto: true }),
     projects: projectManager.listProjects(),
     sharedMemory: effectiveSharedMemory,
   });
@@ -176,6 +181,7 @@ export async function orchestrateTaskMessage({
       taskId: task.task_id,
       projectId: task.project_id,
       defaultRunnerKind,
+      runnerKinds: listSupportedRunnerKinds({ includeAuto: true }),
       projects: projectManager.listProjects(),
       sharedMemory: effectiveSharedMemory,
     });

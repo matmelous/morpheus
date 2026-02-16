@@ -20,6 +20,9 @@ runs-*/
 *.log
 npm-debug.log
 
+# Local runner modules (MCP-like adapters)
+runner-modules/
+
 .DS_Store
 .vscode/
 .idea/

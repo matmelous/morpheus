@@ -22,8 +22,13 @@ import { formatTokenSummaryLine } from '../services/token-meter.js';
 import { extFromMime, safeFileName, buildCanonicalMediaMessage } from '../services/media-utils.js';
 import { transcribeAudioFile } from '../services/transcription.js';
 import { describeImage } from '../services/vision.js';
+import { isRunnerKindSupported, listSupportedRunnerKinds } from '../runners/index.js';
 
 const router = express.Router();
+
+function listRunnerKindsText({ includeAuto = true } = {}) {
+  return listSupportedRunnerKinds({ includeAuto }).join('|');
+}
 
 function extractPhone(jid) {
   if (!jid) return null;
@@ -209,7 +214,7 @@ async function handleCommand(phone, rawText) {
       `/project-mkdir <id> <dir> [--type t] [--name ...] - (admin) Criar pasta no DEVELOPMENT_ROOT + registrar\n` +
       `/project-clone <id> <gitUrl> [--dir d] [--depth 1] [--type t] [--name ...] - (admin) Clonar no DEVELOPMENT_ROOT + registrar\n` +
       `/project-rm <id> - (admin) Remover projeto\n` +
-      `/runner [kind] - Ver/alterar runner (codex-cli|gemini-cli|claude-cli|cursor-cli|desktop-agent|auto)\n` +
+      `/runner [kind] - Ver/alterar runner (${listRunnerKindsText({ includeAuto: true })})\n` +
       `/orchestrator [provider] - Ver/alterar planner (gemini-cli|openrouter|auto)\n\n` +
       `/task-policy [taskIdLen] [historyLimit] - Ver/alterar politica de tasks\n\n` +
       `/confirm - Confirmar uma compra pendente (quando solicitado)\n\n` +
@@ -681,7 +686,7 @@ async function handleCommand(phone, rawText) {
 
   if (cmd === '/runner') {
     const kind = (parts[1] || '').toLowerCase();
-    const allowed = new Set(['codex-cli', 'cursor-cli', 'gemini-cli', 'claude-cli', 'desktop-agent', 'auto']);
+    const allowedText = listRunnerKindsText({ includeAuto: true });
 
     if (!kind) {
       const user = taskStore.getUser(phone);
@@ -692,7 +697,8 @@ async function handleCommand(phone, rawText) {
         `🏃 Runner:\n` +
         `• Global default: *${globalDefault}*\n` +
         `• Seu override: *${user?.runner_override || '(nenhum)'}*\n` +
-        `• Efetivo: *${effective}*\n\n` +
+        `• Efetivo: *${effective}*\n` +
+        `• Disponiveis: *${allowedText}*\n\n` +
         `Use /runner <kind> para mudar.`
       );
       return true;
@@ -704,8 +710,8 @@ async function handleCommand(phone, rawText) {
         return true;
       }
       const v = (parts[2] || '').toLowerCase();
-      if (!allowed.has(v)) {
-        await sendMessage(phone, '❌ Use: /runner global codex-cli|cursor-cli|gemini-cli|claude-cli|desktop-agent|auto');
+      if (!isRunnerKindSupported(v, { includeAuto: true })) {
+        await sendMessage(phone, `❌ Use: /runner global ${allowedText}`);
         return true;
       }
       setSetting(SettingsKeys.runnerDefault, v);
@@ -713,8 +719,8 @@ async function handleCommand(phone, rawText) {
       return true;
     }
 
-    if (!allowed.has(kind)) {
-      await sendMessage(phone, '❌ Use: /runner codex-cli|cursor-cli|gemini-cli|claude-cli|desktop-agent|auto');
+    if (!isRunnerKindSupported(kind, { includeAuto: true })) {
+      await sendMessage(phone, `❌ Use: /runner ${allowedText}`);
       return true;
     }
 
@@ -818,7 +824,10 @@ function resolveProjectForUser(phone) {
 function resolveRunnerForUser(phone) {
   const user = taskStore.getUser(phone);
   const globalDefault = (getRunnerDefault() || config.runnerDefault || 'codex-cli').toLowerCase();
-  return (user?.runner_override || globalDefault || 'codex-cli').toLowerCase();
+  const effective = (user?.runner_override || globalDefault || 'codex-cli').toLowerCase();
+  if (effective === 'auto') return 'codex-cli';
+  if (isRunnerKindSupported(effective)) return effective;
+  return 'codex-cli';
 }
 
 function resolveTaskForInboundMedia(phone) {
@@ -1092,7 +1101,8 @@ async function routeToTask(phone, taskId, message) {
     logger.warn({ error: err?.message }, 'Orchestrator failed, falling back to direct execution');
     const fallbackRunner = (() => {
       const v = String(forcedRunnerKind || globalRunnerDefault || 'codex-cli').toLowerCase();
-      return v === 'auto' ? 'codex-cli' : v;
+      if (v === 'auto') return 'codex-cli';
+      return isRunnerKindSupported(v) ? v : 'codex-cli';
     })();
     await sendMessage(
       phone,
@@ -1184,10 +1194,10 @@ async function routeToTask(phone, taskId, message) {
   if (plan.action === 'set_runner') {
     const kind = String(plan.runner_kind || '').toLowerCase();
     const scope = String(plan.scope || 'user').toLowerCase();
-    const allowed = new Set(['codex-cli', 'cursor-cli', 'gemini-cli', 'claude-cli', 'desktop-agent', 'auto']);
+    const allowedText = listRunnerKindsText({ includeAuto: true });
 
-    if (!allowed.has(kind)) {
-      await sendMessage(phone, '❌ Runner invalido. Use: codex-cli|cursor-cli|gemini-cli|claude-cli|desktop-agent|auto');
+    if (!isRunnerKindSupported(kind, { includeAuto: true })) {
+      await sendMessage(phone, `❌ Runner invalido. Use: ${allowedText}`);
       return;
     }
 
@@ -1422,7 +1432,8 @@ async function routeToTask(phone, taskId, message) {
 
   // action=run
   let runnerKind = String(plan.runner_kind || forcedRunnerKind || globalRunnerDefault || 'codex-cli').toLowerCase();
-  if (runnerKind === 'auto') runnerKind = 'codex-cli';
+  if (runnerKind === 'auto') runnerKind = String(globalRunnerDefault || 'codex-cli').toLowerCase();
+  if (runnerKind === 'auto' || !isRunnerKindSupported(runnerKind)) runnerKind = 'codex-cli';
   const mem = taskStore.getUserSharedMemory(phone)?.content || '';
   const prompt = mem && mem.trim()
     ? `[MEMORIA COMPARTILHADA]\n${mem.trim()}\n\n[PROMPT]\n${String(plan.prompt || message).trim()}`

@@ -1,4 +1,15 @@
-const PLAN_SCHEMA = `{
+function buildPlanSchema(runnerKinds) {
+  const supported = Array.isArray(runnerKinds) && runnerKinds.length
+    ? runnerKinds.filter(Boolean).map((k) => String(k))
+    : ['codex-cli', 'gemini-cli', 'claude-cli', 'cursor-cli', 'desktop-agent', 'auto'];
+
+  const runKinds = supported.filter((k) => k !== 'auto');
+  const setRunnerKinds = supported.includes('auto') ? supported : [...supported, 'auto'];
+
+  const runKindsText = runKinds.map((k) => `"${k}"`).join(' | ');
+  const setRunnerKindsText = setRunnerKinds.map((k) => `"${k}"`).join(' | ');
+
+  return `{
   "version": 1,
   "action": "run" | "reply" | "set_project" | "set_runner" | "set_orchestrator" | "set_task_policy" | "memory_append" | "memory_set" | "memory_clear" | "memory_show" | "project_add" | "project_mkdir" | "project_clone" | "project_scan",
 
@@ -6,7 +17,7 @@ const PLAN_SCHEMA = `{
   "reply_text": string,
 
   // when action = "run"
-  "runner_kind": "codex-cli" | "gemini-cli" | "claude-cli" | "cursor-cli" | "desktop-agent",
+  "runner_kind": ${runKindsText},
   "prompt": string,
 
   // when action = "set_project"
@@ -14,7 +25,7 @@ const PLAN_SCHEMA = `{
   "create_new_task"?: boolean,
 
   // when action = "set_runner"
-  "runner_kind": "codex-cli" | "gemini-cli" | "claude-cli" | "cursor-cli" | "desktop-agent" | "auto",
+  "runner_kind": ${setRunnerKindsText},
   "scope"?: "task" | "user" | "global",
 
   // when action = "set_orchestrator"
@@ -51,6 +62,7 @@ const PLAN_SCHEMA = `{
   // optional
   "title"?: string
 }`;
+}
 
 function formatContext(messages) {
   if (!Array.isArray(messages) || messages.length === 0) return '(sem contexto anterior)';
@@ -89,7 +101,13 @@ export function buildPlannerMessages({
   defaultRunnerKind,
   projects,
   sharedMemory,
+  runnerKinds,
 }) {
+  const supportedRunnerKinds = Array.isArray(runnerKinds) && runnerKinds.length
+    ? runnerKinds
+    : ['codex-cli', 'gemini-cli', 'claude-cli', 'cursor-cli', 'desktop-agent', 'auto'];
+  const runRunnerKinds = supportedRunnerKinds.filter((k) => k !== 'auto').join(', ');
+
   const system = [
     'Voce e o orquestrador principal do "morpheus".',
     'Sua saida DEVE ser APENAS um unico JSON valido (sem markdown, sem texto extra).',
@@ -114,10 +132,10 @@ export function buildPlannerMessages({
     '- Para project_mkdir/project_clone: prefira `dir` relativo ao DEVELOPMENT_ROOT, mas path absoluto tambem e permitido se o usuario pediu.',
     'Regras:',
     '- Se action="reply": reply_text e obrigatorio.',
-    '- Se action="run": prompt e runner_kind sao obrigatorios e runner_kind deve ser um dos runners suportados.',
+    `- Se action="run": prompt e runner_kind sao obrigatorios e runner_kind deve ser um dos runners suportados: ${runRunnerKinds}.`,
     '',
     'Schema do JSON:',
-    PLAN_SCHEMA,
+    buildPlanSchema(supportedRunnerKinds),
     '',
     `Runner preferido (nao obrigatorio): "${defaultRunnerKind}". Se action="run", escolha explicitamente um runner_kind (nao omita).`,
   ].join('\n');

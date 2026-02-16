@@ -9,7 +9,7 @@ dotenv.config();
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const appRoot = resolve(__dirname, '../..');
 
-const RunnerKindSchema = z.enum(['codex-cli', 'cursor-cli', 'gemini-cli', 'claude-cli', 'desktop-agent', 'auto']);
+const RunnerKindSchema = z.string().trim().min(1);
 const OrchestratorProviderSchema = z.enum(['gemini-cli', 'openrouter', 'auto']);
 const TokenEstimatorModeSchema = z.enum(['provider_fallback_estimate']);
 const TokenNotificationLevelSchema = z.enum(['summary']);
@@ -46,6 +46,7 @@ const EnvSchema = z.object({
   GEMINI_APPROVAL_MODE: z.string().optional().default('auto_edit'),
 
   RUNNER_DEFAULT: RunnerKindSchema.optional().default('codex-cli'),
+  RUNNER_MODULES_DIR: z.string().optional().default('./runner-modules'),
 
   CODEX_CLI_COMMAND: z.string().optional().default(''),
   CLAUDE_CLI_COMMAND: z.string().optional().default(''),
@@ -132,6 +133,7 @@ export const config = {
   },
 
   runnerDefault: env.RUNNER_DEFAULT,
+  runnerModulesDir: resolve(appRoot, env.RUNNER_MODULES_DIR),
 
   claude: {
     command: env.CLAUDE_CLI_COMMAND || 'claude',

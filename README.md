@@ -35,6 +35,16 @@ Confirmacao de compra:
 - O agente pede confirmacao apenas para checkout/compra.
 - Responda com `CONFIRMO COMPRA` ou use `/confirm` (expira em 10 min).
 
+## Runner Modules (MCP-like)
+
+Usuarios podem criar modulos especiais de runner (estilo MCP), com interface direta no executor do Morpheus.
+
+- Diretorio padrao: `RUNNER_MODULES_DIR=./runner-modules`
+- Os modulos sao carregados em runtime e aparecem no comando `/runner`
+- O diretorio de modulos locais e ignorado no git
+
+Padrao completo (contrato, exemplo e regras): `docs/runner-modules.md`
+
 ## Projetos
 
 Projetos sao definidos em `projects.json` como um array com:
