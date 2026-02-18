@@ -92,6 +92,44 @@ function formatProjects(projects) {
   return lines.join('\n') + extra;
 }
 
+function formatRunnerCatalog(runnerCatalog, fallbackRunnerKinds) {
+  const kinds = Array.isArray(fallbackRunnerKinds)
+    ? fallbackRunnerKinds.filter(Boolean).map((k) => String(k))
+    : [];
+
+  const list = Array.isArray(runnerCatalog) ? runnerCatalog : [];
+  if (list.length === 0) {
+    return kinds.length ? kinds.map((k) => `- ${k}`).join('\n') : '(catalogo indisponivel)';
+  }
+
+  const lines = [];
+  for (const item of list.slice(0, 20)) {
+    const kind = String(item?.kind || '').trim();
+    if (!kind) continue;
+
+    const planner = item?.planner && typeof item.planner === 'object' ? item.planner : null;
+    const purpose = planner?.purpose ? String(planner.purpose).trim() : '';
+    lines.push(`- ${kind}${purpose ? `: ${purpose}` : ''}`);
+
+    const whenToUse = Array.isArray(planner?.whenToUse) ? planner.whenToUse : [];
+    if (whenToUse.length > 0) {
+      lines.push(`  quando_usar: ${whenToUse.join(' | ')}`);
+    }
+
+    const promptRules = Array.isArray(planner?.promptRules) ? planner.promptRules : [];
+    if (promptRules.length > 0) {
+      lines.push(`  prompt_rules: ${promptRules.join(' | ')}`);
+    }
+
+    const promptExamples = Array.isArray(planner?.promptExamples) ? planner.promptExamples : [];
+    if (promptExamples.length > 0) {
+      lines.push(`  prompt_examples: ${promptExamples.join(' | ')}`);
+    }
+  }
+
+  return lines.length > 0 ? lines.join('\n') : '(catalogo indisponivel)';
+}
+
 export function buildPlannerMessages({
   userMessage,
   contextMessages,
@@ -102,11 +140,15 @@ export function buildPlannerMessages({
   projects,
   sharedMemory,
   runnerKinds,
+  runnerCatalog,
 }) {
   const supportedRunnerKinds = Array.isArray(runnerKinds) && runnerKinds.length
     ? runnerKinds
     : ['codex-cli', 'gemini-cli', 'claude-cli', 'cursor-cli', 'desktop-agent', 'auto'];
   const runRunnerKinds = supportedRunnerKinds.filter((k) => k !== 'auto').join(', ');
+  const runnerCatalogText = formatRunnerCatalog(runnerCatalog, supportedRunnerKinds);
+  const forcedRunner = String(forcedRunnerKind || '').trim().toLowerCase();
+  const hasForcedRunner = Boolean(forcedRunner && forcedRunner !== 'auto');
 
   const system = [
     'Voce e o orquestrador principal do "morpheus".',
@@ -120,7 +162,18 @@ export function buildPlannerMessages({
     '- Use runner_kind="desktop-agent" quando o pedido exigir acoes na interface do computador: abrir apps, navegar em sites, clicar, preencher campos, ler conteudo visual, tirar prints/screenshot, verificar algo "na tela".',
     '- Use runner_kind="desktop-agent" tambem quando o usuario pedir explicitamente imagens/prints como evidencia.',
     '- Caso contrario, prefira o runner default (codex/claude/cursor/gemini) para tarefas de codigo e shell.',
+    '- Se existir um runner externo especializado para a tarefa no catalogo abaixo, prefira esse runner especializado.',
+    '- Quando um runner tiver `prompt_rules`, voce DEVE gerar `plan.prompt` estritamente nesse formato.',
+    ...(hasForcedRunner
+      ? [
+          `- Runner travado para esta task: "${forcedRunner}".`,
+          `- Quando action="run", use obrigatoriamente runner_kind="${forcedRunner}" e siga as regras desse runner no catalogo.`,
+        ]
+      : []),
     'Importante: o runner pode usar caminhos fora do projeto (ex.: criar/alterar coisas em DEVELOPMENT_ROOT) quando isso for necessario para cumprir o pedido. Seja explicito com paths absolutos e passos de validacao.',
+    '',
+    'Catalogo de runners (MCP-like):',
+    runnerCatalogText,
     '',
     'Quando o usuario pedir algo de configuracao em linguagem natural (sem comandos /...):',
     '- Trocar de projeto: use action="set_project" (nao use action="run").',

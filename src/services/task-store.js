@@ -493,6 +493,50 @@ class TaskStore {
       total_tokens: Number(t.totalTokens) || 0,
     });
   }
+
+  getDiscordChannel(channelId) {
+    return this.db.prepare(
+      'SELECT channel_id, guild_id, enabled, created_by, created_at, updated_at FROM discord_channels WHERE channel_id = ?'
+    ).get(String(channelId || '')) || null;
+  }
+
+  upsertDiscordChannel({ channelId, guildId, createdBy = null, enabled = true }) {
+    const now = nowIso();
+    this.db.prepare(`
+      INSERT INTO discord_channels
+        (channel_id, guild_id, enabled, created_by, created_at, updated_at)
+      VALUES
+        (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(channel_id) DO UPDATE SET
+        guild_id = excluded.guild_id,
+        enabled = excluded.enabled,
+        created_by = COALESCE(excluded.created_by, discord_channels.created_by),
+        updated_at = excluded.updated_at
+    `).run(
+      String(channelId || '').trim(),
+      String(guildId || '').trim(),
+      enabled ? 1 : 0,
+      createdBy == null ? null : String(createdBy),
+      now,
+      now
+    );
+
+    return this.getDiscordChannel(channelId);
+  }
+
+  setDiscordChannelEnabled(channelId, enabled) {
+    const info = this.db.prepare(
+      'UPDATE discord_channels SET enabled = ?, updated_at = ? WHERE channel_id = ?'
+    ).run(enabled ? 1 : 0, nowIso(), String(channelId || '').trim());
+    return info.changes > 0;
+  }
+
+  isDiscordChannelEnabled(channelId) {
+    const row = this.db.prepare(
+      'SELECT enabled FROM discord_channels WHERE channel_id = ?'
+    ).get(String(channelId || '').trim());
+    return Number(row?.enabled || 0) === 1;
+  }
 }
 
 export const taskStore = new TaskStore();
