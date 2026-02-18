@@ -8,7 +8,7 @@ import { makeId } from '../utils/ids.js';
 import { spawnStreamingProcess } from '../utils/spawn.js';
 import { getRunner } from '../runners/index.js';
 import { taskStore } from './task-store.js';
-import { sendImage, sendMessage } from './whatsapp.js';
+import { sendImage, sendMessage } from './messenger.js';
 import {
   estimateUsage,
   formatTokenSummaryLine,
@@ -85,6 +85,22 @@ function extractLastJsonlEventSummary(line) {
   } catch {
     return String(line || '').slice(0, 500);
   }
+}
+
+function buildExecutionBrief({ prompt, taskTitle }) {
+  const marker = '[PROMPT]';
+  const rawPrompt = String(prompt || '').trim();
+  let text = rawPrompt;
+
+  if (rawPrompt.includes(marker)) {
+    text = rawPrompt.slice(rawPrompt.lastIndexOf(marker) + marker.length).trim();
+  }
+
+  text = text.replace(/\s+/g, ' ').trim();
+  if (!text) text = String(taskTitle || '').replace(/\s+/g, ' ').trim();
+  if (!text) return null;
+
+  return truncate(text, 220);
 }
 
 async function trySendFailureScreenshot(phone, artifactsDir) {
@@ -253,13 +269,15 @@ class Executor {
     });
 
     const phone = task.phone;
+    const executionBrief = buildExecutionBrief({ prompt: run.prompt, taskTitle: task.title });
 
     await sendMessage(
       phone,
       `🚀 *Iniciando*:\n` +
       `• Task: *${task.task_id}*\n` +
       `• Projeto: *${task.project_id}*\n` +
-      `• Runner: *${run.runner_kind}*`
+      `• Runner: *${run.runner_kind}*` +
+      (executionBrief ? `\n• Entendimento: ${executionBrief}` : '')
     );
 
     const state = {

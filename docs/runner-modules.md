@@ -25,6 +25,23 @@ export default {
   // identificador do runner (usado em /runner e no planner)
   kind: 'meu-runner',
 
+  // opcional: metadados para orientar o planner (MCP-like)
+  planner: {
+    purpose: 'O que este runner faz de forma especializada.',
+    whenToUse: [
+      'Quando usar este runner.',
+      'Sinais/tipos de pedido em que ele e preferivel.',
+    ],
+    promptRules: [
+      'Formato esperado para plan.prompt.',
+      'Ex.: "marcar <uuid> como lida".',
+    ],
+    promptExamples: [
+      'listar mensagens abertas',
+      '{"action":"mark_read","id":"<uuid>"}',
+    ],
+  },
+
   // obrigatorio: monta o comando executado pelo executor
   build({ prompt, cwd, artifactsDir, config }) {
     const command = '/usr/local/bin/minha-cli';
@@ -55,6 +72,15 @@ export default {
 ```
 
 Tambem e aceito `export const runnerModule = { ... }`.
+
+### Metadados `planner` (recomendado)
+
+Se presentes, esses campos entram no prompt do orchestrator para melhorar escolha de `runner_kind` e formato de `plan.prompt`:
+
+- `purpose`: resumo curto da especialidade do runner.
+- `whenToUse`: lista de gatilhos/situacoes em que esse runner deve ser preferido.
+- `promptRules`: contrato de entrada esperado pelo runner.
+- `promptExamples`: exemplos de prompts validos.
 
 ## Regras de carregamento
 

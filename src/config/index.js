@@ -24,6 +24,13 @@ const EnvSchema = z.object({
   WHATSAPP_INSTANCE_ID: z.string().optional().default('morpheus-standalone'),
   WHATSAPP_AUTH_DIR: z.string().optional().default('./data/whatsapp-auth'),
 
+  DISCORD_ENABLED: z.string().optional().default('false'),
+  DISCORD_BOT_TOKEN: z.string().optional().default(''),
+  DISCORD_INSTANCE_ID: z.string().optional().default('morpheus-discord'),
+  DISCORD_ALLOWED_GUILD_IDS: z.string().optional().default(''),
+  DISCORD_ADMIN_USER_IDS: z.string().optional().default(''),
+  DISCORD_MESSAGE_MAX_LENGTH: z.coerce.number().int().positive().default(1900),
+
   ALLOWED_PHONE_NUMBERS: z.string().min(1),
   ADMIN_PHONE_NUMBERS: z.string().optional().default(''),
 
@@ -104,6 +111,15 @@ export const config = {
   whatsappInstanceId: env.WHATSAPP_INSTANCE_ID,
   whatsappAuthDir: resolve(appRoot, env.WHATSAPP_AUTH_DIR),
 
+  discord: {
+    enabled: parseBool(env.DISCORD_ENABLED, false),
+    botToken: env.DISCORD_BOT_TOKEN,
+    instanceId: env.DISCORD_INSTANCE_ID,
+    allowedGuildIds: parseCsvList(env.DISCORD_ALLOWED_GUILD_IDS),
+    adminUserIds: parseCsvList(env.DISCORD_ADMIN_USER_IDS),
+    messageMaxLength: env.DISCORD_MESSAGE_MAX_LENGTH,
+  },
+
   allowedPhoneNumbers,
   adminPhoneNumbers: parseCsvList(env.ADMIN_PHONE_NUMBERS),
 
@@ -180,6 +196,12 @@ export const config = {
 };
 
 export function validateConfig() {
+  if (config.discord.enabled && !String(config.discord.botToken || '').trim()) {
+    throw new Error('DISCORD_BOT_TOKEN is required when DISCORD_ENABLED=true');
+  }
+  if (config.discord.enabled && config.discord.allowedGuildIds.length === 0) {
+    throw new Error('DISCORD_ALLOWED_GUILD_IDS must contain at least one guild id when DISCORD_ENABLED=true');
+  }
   return true;
 }
 

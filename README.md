@@ -1,80 +1,188 @@
-# morpheus
+# Morpheus
 
-Morpheus e uma versao standalone do personal-mac-interface:
+Morpheus é um **orquestrador de IA open source** acessível por **WhatsApp e Discord**.
 
-WhatsApp (Baileys local) -> Orchestrator -> Local AI CLIs (Codex/Cursor/Gemini/Claude)
+Fluxo principal:
+
+```text
+WhatsApp/Discord -> Planner (orchestrator) -> Executor -> Runners locais -> Resposta + artefatos
+```
+
+Runners nativos atuais: `codex-cli`, `claude-cli`, `cursor-cli`, `gemini-cli`, `desktop-agent`.
+
+## O que o projeto entrega
+
+- Entrada por chat (WhatsApp e Discord) para operar projetos locais.
+- Múltiplas tasks por usuário/canal, com fila e cancelamento.
+- Planejamento automático de ação (`run`, `reply`, troca de projeto/runner, memória etc.).
+- Execução local de CLIs de IA com logs e artefatos em `runs/`.
+- Extensibilidade por módulos pessoais de runner (MCP-like), sem alterar o core.
+
+## Como funciona: Planner
+
+O planner é o cérebro do Morpheus. Ele recebe:
+
+- mensagem atual do usuário;
+- contexto recente da task;
+- projeto ativo;
+- memória compartilhada do usuário;
+- catálogo de runners disponíveis (nativos + módulos externos).
+
+Com isso, devolve um JSON de plano com uma ação. Exemplos:
+
+- `run` (executar em um runner);
+- `reply` (responder sem executar);
+- `set_project`, `set_runner`, `set_orchestrator`;
+- `memory_append`, `memory_set`, `memory_clear`, `memory_show`;
+- `project_add`, `project_mkdir`, `project_clone`, `project_scan`.
+
+Resumo prático:
+
+- Se o pedido é trabalho técnico, normalmente gera `action="run"` e escolhe `runner_kind`.
+- Se for ajuste de configuração em linguagem natural, pode gerar `set_*`.
+- Se a mensagem for vaga (`oi`, `bom dia`), tende a responder com orientações curtas.
+
+Providers de planner suportados:
+
+- `gemini-cli` (default);
+- `openrouter` (fallback/alternativa).
+
+## Como funciona: Runners
+
+Runners são os executores. Cada runner:
+
+- recebe `plan.prompt` e contexto (`cwd`, `artifactsDir`, `config`);
+- monta o comando real de execução (`build`);
+- interpreta a saída da CLI para atualizar progresso (`parseLine`, opcional).
+
+Runners nativos:
+
+- `codex-cli`, `claude-cli`, `cursor-cli`, `gemini-cli`: foco em código/shell;
+- `desktop-agent`: foco em automação de UI web/desktop com evidência visual.
+
+O executor controla fila, concorrência, timeout, cancelamento e persistência dos artefatos.
+
+## Módulos pessoais (runner modules)
+
+Você pode criar runners próprios sem alterar o código principal.
+
+- Diretório padrão: `RUNNER_MODULES_DIR=./runner-modules`;
+- cada arquivo `.js`, `.mjs` ou `.cjs` exporta um módulo com `kind` + `build()`;
+- `parseLine()` e metadados `planner` são opcionais, mas recomendados;
+- módulos válidos aparecem no comando `/runner`.
+
+Importante:
+
+- `runner-modules/` está no `.gitignore`;
+- isso significa que módulos pessoais **não entram no git do projeto principal**.
+
+Contrato completo, exemplo e regras:
+
+- `docs/runner-modules.md`.
+
+## Sugestão de versionamento para módulos pessoais
+
+Recomendado: manter os módulos em **repositório separado** e apontar `RUNNER_MODULES_DIR` para fora deste repo.
+
+Exemplo:
+
+1. Criar repositório próprio, ex.: `morpheus-runner-modules` (público ou privado).
+2. Clonar em outro caminho local, ex.: `/Users/seu-usuario/dev/morpheus-runner-modules`.
+3. No Morpheus, definir no `.env.local`: `RUNNER_MODULES_DIR=/Users/seu-usuario/dev/morpheus-runner-modules`.
+4. Versionar os módulos nesse repositório dedicado (branches, tags e releases), sem poluir o `morpheus`.
+
+Vantagens:
+
+- histórico limpo no core;
+- permissão separada por time/cliente;
+- possibilidade de publicar módulos reutilizáveis.
 
 ## Requisitos
 
-- Node >= 20
-- `npm i`
-- `npx playwright install`
+- Node.js >= 20;
+- `npm i`;
+- `npx playwright install`.
 
-Opcional para automacao GUI no macOS:
-- `brew install cliclick`
-- `brew install tesseract`
+Opcional para automação GUI no macOS:
 
-Permissoes do macOS:
-- Screen Recording
-- Accessibility
+- `brew install cliclick`;
+- `brew install tesseract`.
 
-## Setup rapido
+Permissões do macOS:
 
-1. Rode `npm run init:projects` e informe path, nome, type e um numero permitido (allowlist).
-2. O script cria `projects.json`, cria/atualiza `.env` e inicia o servidor (`npm run dev`) automaticamente.
+- Screen Recording;
+- Accessibility.
+
+## Setup rápido
+
+1. Rode `npm run init:projects` e informe path, nome, type e um número permitido.
+2. O script cria `projects.json`, cria/atualiza `.env` e inicia `npm run dev`.
 3. Ajuste no `.env` o que faltar (ex.: `ADMIN_PHONE_NUMBERS`).
-4. No primeiro start, o Baileys vai logar um QR no terminal (`connection.update.qr`). Escaneie em WhatsApp > Linked Devices.
+4. No primeiro start, o Baileys mostra um QR no terminal; escaneie em WhatsApp > Linked Devices.
 
-Os arquivos de sessao do WhatsApp ficam em `WHATSAPP_AUTH_DIR` (default: `./data/whatsapp-auth`).
+Sessão do WhatsApp:
 
-## Desktop Agent (web + macOS GUI)
+- `WHATSAPP_AUTH_DIR` (default: `./data/whatsapp-auth`).
 
-Este app inclui o runner `desktop-agent` para automacao no macOS (web-first com Playwright + GUI via ferramentas do sistema).
+## Discord (task fixa por canal)
 
-Confirmacao de compra:
-- O agente pede confirmacao apenas para checkout/compra.
-- Responda com `CONFIRMO COMPRA` ou use `/confirm` (expira em 10 min).
+Guia completo:
 
-## Runner Modules (MCP-like)
+- `docs/discord.md`.
 
-Usuarios podem criar modulos especiais de runner (estilo MCP), com interface direta no executor do Morpheus.
+Resumo:
 
-- Diretorio padrao: `RUNNER_MODULES_DIR=./runner-modules`
-- Os modulos sao carregados em runtime e aparecem no comando `/runner`
-- O diretorio de modulos locais e ignorado no git
-
-Padrao completo (contrato, exemplo e regras): `docs/runner-modules.md`
+- Um bot pode atender vários servidores (`DISCORD_ALLOWED_GUILD_IDS`);
+- cada canal precisa ser habilitado com `/channel-enable`;
+- cada canal habilitado opera com task fixa própria;
+- canais não habilitados ficam em silêncio.
 
 ## Projetos
 
-Projetos sao definidos em `projects.json` como um array com:
-- `id` (obrigatorio)
-- `cwd` (obrigatorio)
-- `name` (opcional)
-- `type` (opcional)
+Projetos vivem em `projects.json`:
 
-Comandos no WhatsApp:
-- `/projects`
-- `/project <id>`
-- `/project-add <id> <cwd> [type] [name...]` (admin)
-- `/project-base` (admin)
-- `/project-scan` (admin)
-- `/project-mkdir <id> <dir> [--type t] [--name ...]` (admin)
-- `/project-clone <id> <gitUrl> [--dir d] [--depth 1] [--type t] [--name ...]` (admin)
-- `/project-rm <id>` (admin)
+- `id` (obrigatório);
+- `cwd` (obrigatório);
+- `name` (opcional);
+- `type` (opcional).
 
-## Midia recebida (audio/imagem)
+Comandos úteis:
+
+- `/projects`;
+- `/project <id>`;
+- `/project-add <id> <cwd> [type] [name...]` (admin);
+- `/project-base` (admin);
+- `/project-scan` (admin);
+- `/project-mkdir <id> <dir> [--type t] [--name ...]` (admin);
+- `/project-clone <id> <gitUrl> [--dir d] [--depth 1] [--type t] [--name ...]` (admin);
+- `/project-rm <id>` (admin).
+
+## Mídia recebida (áudio/imagem)
 
 Fluxo:
-1. Baixa a midia diretamente pelo socket Baileys.
-2. Salva em `RUNS_DIR/<taskId>/inbox/<messageId>/`.
-3. Audio: transcreve via OpenAI Whisper (`OPENAI_API_KEY`).
-4. Imagem: descreve via OpenRouter multimodal (`OPENROUTER_API_KEY`).
-5. Converte para texto canonico e executa no orquestrador.
 
-## Memoria compartilhada
+1. Baixa a mídia recebida.
+2. Salva em `RUNS_DIR/<taskId>/inbox/<messageId>/`.
+3. Áudio: transcreve via OpenAI Whisper (`OPENAI_API_KEY`).
+4. Imagem: descreve via provider multimodal (`OPENROUTER_API_KEY`).
+5. Converte para texto canônico e envia ao orquestrador.
+
+## Memória compartilhada
 
 Comandos:
-- `/memory`
-- `/remember <texto>`
-- `/forget-memory`
+
+- `/memory`;
+- `/remember <texto>`;
+- `/forget-memory`.
+
+## Open source e contribuição
+
+Morpheus é open source e aceita melhorias da comunidade.
+
+- Abra uma issue para bugs, ideias e discussões de arquitetura.
+- Envie PR com mudança objetiva e contexto de validação.
+- Priorize alterar docs quando adicionar ou mudar comportamento.
+
+Licença:
+
+- `LICENSE` (MIT).

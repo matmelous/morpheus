@@ -5,7 +5,7 @@ import { validatePlan } from '../planner/schema.js';
 import { buildPlannerMessages } from '../planner/prompt.js';
 import { planWithGeminiCli } from '../planner/gemini-cli.js';
 import { planWithOpenRouter } from '../planner/openrouter.js';
-import { isRunnerKindSupported, listSupportedRunnerKinds } from '../runners/index.js';
+import { isRunnerKindSupported, listRunnerCatalog, listSupportedRunnerKinds } from '../runners/index.js';
 import { taskStore } from './task-store.js';
 import { getOrchestratorProviderDefault, getRunnerDefault } from './settings.js';
 import { projectManager } from './project-manager.js';
@@ -76,8 +76,10 @@ function buildPlannerPromptPayload({
   contextMessages,
   taskId,
   projectId,
+  forcedRunnerKind,
   defaultRunnerKind,
   runnerKinds,
+  runnerCatalog,
   projects,
   sharedMemory,
 }) {
@@ -86,9 +88,10 @@ function buildPlannerPromptPayload({
     contextMessages,
     taskId,
     projectId,
-    forcedRunnerKind: null,
+    forcedRunnerKind,
     defaultRunnerKind,
     runnerKinds,
+    runnerCatalog,
     projects,
     sharedMemory,
   });
@@ -114,8 +117,13 @@ export async function orchestrateTaskMessage({
     || 'gemini-cli';
 
   const globalRunnerDefault = (getRunnerDefault() || config.runnerDefault || 'codex-cli').toLowerCase();
+  const forcedRunnerKind = (() => {
+    const normalized = String(preferredRunnerKind || '').toLowerCase();
+    if (!normalized || normalized === 'auto') return null;
+    return isRunnerKindSupported(normalized) ? normalized : null;
+  })();
   const defaultRunnerKind = (() => {
-    const v = (preferredRunnerKind && preferredRunnerKind !== 'auto') ? preferredRunnerKind : globalRunnerDefault;
+    const v = forcedRunnerKind || globalRunnerDefault;
     if (!v || v === 'auto') return 'codex-cli';
     const normalized = String(v).toLowerCase();
     return isRunnerKindSupported(normalized) ? normalized : 'codex-cli';
@@ -146,6 +154,8 @@ export async function orchestrateTaskMessage({
   const budgetBefore = Math.max(1, Math.min(plannerCallBudget, taskBudgetRemaining || plannerCallBudget));
 
   const rawContextMessages = taskStore.listTaskMessages(task.task_id, config.plannerMaxContextMessages);
+  const runnerKinds = listSupportedRunnerKinds({ includeAuto: true });
+  const runnerCatalog = listRunnerCatalog({ includeAuto: true });
   let effectiveContextMessages = rawContextMessages;
   let effectiveSharedMemory = originalSharedMemory;
 
@@ -154,8 +164,10 @@ export async function orchestrateTaskMessage({
     contextMessages: effectiveContextMessages,
     taskId: task.task_id,
     projectId: task.project_id,
+    forcedRunnerKind,
     defaultRunnerKind,
-    runnerKinds: listSupportedRunnerKinds({ includeAuto: true }),
+    runnerKinds,
+    runnerCatalog,
     projects: projectManager.listProjects(),
     sharedMemory: effectiveSharedMemory,
   });
@@ -180,8 +192,10 @@ export async function orchestrateTaskMessage({
       contextMessages: effectiveContextMessages,
       taskId: task.task_id,
       projectId: task.project_id,
+      forcedRunnerKind,
       defaultRunnerKind,
-      runnerKinds: listSupportedRunnerKinds({ includeAuto: true }),
+      runnerKinds,
+      runnerCatalog,
       projects: projectManager.listProjects(),
       sharedMemory: effectiveSharedMemory,
     });
