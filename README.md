@@ -1,152 +1,161 @@
 # Morpheus
 
-Morpheus é um **orquestrador de IA open source** acessível por **WhatsApp e Discord**.
+Language: **English** | [Português (pt-BR)](README.pt-BR.md)
 
-Fluxo principal:
+Morpheus is an **open-source AI orchestrator** accessible through **WhatsApp and Discord**.
+
+Main flow:
 
 ```text
-WhatsApp/Discord -> Planner (orchestrator) -> Executor -> Runners locais -> Resposta + artefatos
+WhatsApp/Discord -> Planner (orchestrator) -> Executor -> Local runners -> Reply + artifacts
 ```
 
-Runners nativos atuais: `codex-cli`, `claude-cli`, `cursor-cli`, `gemini-cli`, `desktop-agent`.
+Current built-in runners: `codex-cli`, `claude-cli`, `cursor-cli`, `gemini-cli`, `desktop-agent`.
 
-## O que o projeto entrega
+Documentation index:
 
-- Entrada por chat (WhatsApp e Discord) para operar projetos locais.
-- Múltiplas tasks por usuário/canal, com fila e cancelamento.
-- Planejamento automático de ação (`run`, `reply`, troca de projeto/runner, memória etc.).
-- Execução local de CLIs de IA com logs e artefatos em `runs/`.
-- Extensibilidade por módulos pessoais de runner (MCP-like), sem alterar o core.
+- English: `docs/README.md`;
+- Portuguese: `docs/README.pt-BR.md`.
 
-## Como funciona: Planner
+## What Morpheus provides
 
-O planner é o cérebro do Morpheus. Ele recebe:
+- Chat entrypoint (WhatsApp and Discord) to operate local projects.
+- Multiple tasks per user/channel, with queue and cancellation support.
+- Automatic action planning (`run`, `reply`, project/runner switching, memory operations, etc.).
+- Local AI CLI execution with logs and artifacts in `runs/`.
+- Extensibility via personal runner modules (MCP-like) without changing core code.
 
-- mensagem atual do usuário;
-- contexto recente da task;
-- projeto ativo;
-- memória compartilhada do usuário;
-- catálogo de runners disponíveis (nativos + módulos externos).
+## How it works: Planner
 
-Com isso, devolve um JSON de plano com uma ação. Exemplos:
+The planner is Morpheus' decision layer. It receives:
 
-- `run` (executar em um runner);
-- `reply` (responder sem executar);
+- current user message;
+- recent task context;
+- active project;
+- user shared memory;
+- available runner catalog (built-in + external modules).
+
+It returns a JSON plan action. Examples:
+
+- `run` (execute with a runner);
+- `reply` (answer without execution);
 - `set_project`, `set_runner`, `set_orchestrator`;
 - `memory_append`, `memory_set`, `memory_clear`, `memory_show`;
 - `project_add`, `project_mkdir`, `project_clone`, `project_scan`.
 
-Resumo prático:
+Practical behavior:
 
-- Se o pedido é trabalho técnico, normalmente gera `action="run"` e escolhe `runner_kind`.
-- Se for ajuste de configuração em linguagem natural, pode gerar `set_*`.
-- Se a mensagem for vaga (`oi`, `bom dia`), tende a responder com orientações curtas.
+- Technical requests usually become `action="run"` plus a selected `runner_kind`.
+- Natural-language configuration requests can become `set_*` actions.
+- Vague greetings (`hi`, `hello`) usually return short guidance.
 
-Providers de planner suportados:
+Supported planner providers:
 
 - `gemini-cli` (default);
-- `openrouter` (fallback/alternativa).
+- `openrouter` (fallback/alternative).
 
-## Como funciona: Runners
+## How it works: Runners
 
-Runners são os executores. Cada runner:
+Runners execute work. Each runner:
 
-- recebe `plan.prompt` e contexto (`cwd`, `artifactsDir`, `config`);
-- monta o comando real de execução (`build`);
-- interpreta a saída da CLI para atualizar progresso (`parseLine`, opcional).
+- receives `plan.prompt` and context (`cwd`, `artifactsDir`, `config`);
+- builds the real command (`build`);
+- optionally parses CLI output for progress updates (`parseLine`).
 
-Runners nativos:
+Built-in runners:
 
-- `codex-cli`, `claude-cli`, `cursor-cli`, `gemini-cli`: foco em código/shell;
-- `desktop-agent`: foco em automação de UI web/desktop com evidência visual.
+- `codex-cli`, `claude-cli`, `cursor-cli`, `gemini-cli`: code/shell focused;
+- `desktop-agent`: web/desktop UI automation with visual evidence.
 
-O executor controla fila, concorrência, timeout, cancelamento e persistência dos artefatos.
+The executor handles queueing, concurrency, timeout, cancellation, and artifact persistence.
 
-## Módulos pessoais (runner modules)
+## Personal modules (runner modules)
 
-Você pode criar runners próprios sem alterar o código principal.
+You can create custom runners without changing main repository code.
 
-- Diretório padrão: `RUNNER_MODULES_DIR=./runner-modules`;
-- cada arquivo `.js`, `.mjs` ou `.cjs` exporta um módulo com `kind` + `build()`;
-- `parseLine()` e metadados `planner` são opcionais, mas recomendados;
-- módulos válidos aparecem no comando `/runner`.
+- Default directory: `RUNNER_MODULES_DIR=./runner-modules`;
+- each `.js`, `.mjs`, or `.cjs` file exports a module with `kind` + `build()`;
+- `parseLine()` and `planner` metadata are optional but recommended;
+- valid modules appear in `/runner`.
 
-Importante:
+Important:
 
-- `runner-modules/` está no `.gitignore`;
-- isso significa que módulos pessoais **não entram no git do projeto principal**.
+- `runner-modules/` is in `.gitignore`;
+- personal modules are **not added to the main Morpheus git history**.
 
-Contrato completo, exemplo e regras:
+Full contract, examples, and rules:
 
-- `docs/runner-modules.md`.
+- English: `docs/runner-modules.md`;
+- Portuguese: `docs/runner-modules.pt-BR.md`.
 
-## Sugestão de versionamento para módulos pessoais
+## Recommended versioning strategy for personal modules
 
-Recomendado: manter os módulos em **repositório separado** e apontar `RUNNER_MODULES_DIR` para fora deste repo.
+Recommended approach: keep modules in a **separate repository** and point `RUNNER_MODULES_DIR` outside this repo.
 
-Exemplo:
+Example:
 
-1. Criar repositório próprio, ex.: `morpheus-runner-modules` (público ou privado).
-2. Clonar em outro caminho local, ex.: `/Users/seu-usuario/dev/morpheus-runner-modules`.
-3. No Morpheus, definir no `.env.local`: `RUNNER_MODULES_DIR=/Users/seu-usuario/dev/morpheus-runner-modules`.
-4. Versionar os módulos nesse repositório dedicado (branches, tags e releases), sem poluir o `morpheus`.
+1. Create a dedicated repository, e.g. `morpheus-runner-modules`.
+2. Clone it somewhere else, e.g. `/Users/your-user/dev/morpheus-runner-modules`.
+3. In Morpheus, set `.env.local`: `RUNNER_MODULES_DIR=/Users/your-user/dev/morpheus-runner-modules`.
+4. Version modules in the dedicated repo (branches/tags/releases), without polluting Morpheus core history.
 
-Vantagens:
+Benefits:
 
-- histórico limpo no core;
-- permissão separada por time/cliente;
-- possibilidade de publicar módulos reutilizáveis.
+- cleaner core history;
+- separate access control per team/client;
+- reusable module publishing.
 
-## Requisitos
+## Requirements
 
 - Node.js >= 20;
 - `npm i`;
 - `npx playwright install`.
 
-Opcional para automação GUI no macOS:
+Optional for GUI automation on macOS:
 
 - `brew install cliclick`;
 - `brew install tesseract`.
 
-Permissões do macOS:
+macOS permissions:
 
 - Screen Recording;
 - Accessibility.
 
-## Setup rápido
+## Quick setup
 
-1. Rode `npm run init:projects` e informe path, nome, type e um número permitido.
-2. O script cria `projects.json`, cria/atualiza `.env` e inicia `npm run dev`.
-3. Ajuste no `.env` o que faltar (ex.: `ADMIN_PHONE_NUMBERS`).
-4. No primeiro start, o Baileys mostra um QR no terminal; escaneie em WhatsApp > Linked Devices.
+1. Run `npm run init:projects` and provide path, name, type, and one allowed number.
+2. The script creates `projects.json`, updates `.env`, and starts `npm run dev`.
+3. Adjust missing values in `.env` (e.g. `ADMIN_PHONE_NUMBERS`).
+4. On first startup, Baileys prints a QR code in terminal; scan it in WhatsApp > Linked Devices.
 
-Sessão do WhatsApp:
+WhatsApp session location:
 
 - `WHATSAPP_AUTH_DIR` (default: `./data/whatsapp-auth`).
 
-## Discord (task fixa por canal)
+## Discord (fixed task per channel)
 
-Guia completo:
+Full guide:
 
-- `docs/discord.md`.
+- English: `docs/discord.md`;
+- Portuguese: `docs/discord.pt-BR.md`.
 
-Resumo:
+Summary:
 
-- Um bot pode atender vários servidores (`DISCORD_ALLOWED_GUILD_IDS`);
-- cada canal precisa ser habilitado com `/channel-enable`;
-- cada canal habilitado opera com task fixa própria;
-- canais não habilitados ficam em silêncio.
+- One bot can serve multiple guilds (`DISCORD_ALLOWED_GUILD_IDS`);
+- each channel must be enabled with `/channel-enable`;
+- each enabled channel uses its own fixed task context;
+- non-enabled channels stay silent.
 
-## Projetos
+## Projects
 
-Projetos vivem em `projects.json`:
+Projects are defined in `projects.json`:
 
-- `id` (obrigatório);
-- `cwd` (obrigatório);
-- `name` (opcional);
-- `type` (opcional).
+- `id` (required);
+- `cwd` (required);
+- `name` (optional);
+- `type` (optional).
 
-Comandos úteis:
+Useful commands:
 
 - `/projects`;
 - `/project <id>`;
@@ -157,32 +166,37 @@ Comandos úteis:
 - `/project-clone <id> <gitUrl> [--dir d] [--depth 1] [--type t] [--name ...]` (admin);
 - `/project-rm <id>` (admin).
 
-## Mídia recebida (áudio/imagem)
+## Incoming media (audio/image)
 
-Fluxo:
+Flow:
 
-1. Baixa a mídia recebida.
-2. Salva em `RUNS_DIR/<taskId>/inbox/<messageId>/`.
-3. Áudio: transcreve via OpenAI Whisper (`OPENAI_API_KEY`).
-4. Imagem: descreve via provider multimodal (`OPENROUTER_API_KEY`).
-5. Converte para texto canônico e envia ao orquestrador.
+1. Download incoming media.
+2. Save in `RUNS_DIR/<taskId>/inbox/<messageId>/`.
+3. Audio: transcribe with OpenAI Whisper (`OPENAI_API_KEY`).
+4. Image: describe with multimodal provider (`OPENROUTER_API_KEY`).
+5. Convert to canonical text and pass to the orchestrator.
 
-## Memória compartilhada
+Media docs:
 
-Comandos:
+- English: `docs/whatsapp-media.md`;
+- Portuguese: `docs/whatsapp-media.pt-BR.md`.
+
+## Shared memory
+
+Commands:
 
 - `/memory`;
-- `/remember <texto>`;
+- `/remember <text>`;
 - `/forget-memory`.
 
-## Open source e contribuição
+## Open source and contributions
 
-Morpheus é open source e aceita melhorias da comunidade.
+Morpheus is open source and community improvements are welcome.
 
-- Abra uma issue para bugs, ideias e discussões de arquitetura.
-- Envie PR com mudança objetiva e contexto de validação.
-- Priorize alterar docs quando adicionar ou mudar comportamento.
+- Open issues for bugs, ideas, and architecture discussions.
+- Send PRs with clear scope and validation context.
+- Update docs when behavior is added or changed.
 
-Licença:
+License:
 
 - `LICENSE` (MIT).
