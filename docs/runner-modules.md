@@ -1,56 +1,58 @@
-# Runner Modules (padrao MCP-like)
+# Runner Modules (MCP-like pattern)
 
-Este projeto suporta modulos locais de runner com interface direta no executor.
-A ideia e similar a MCP (modulos desacoplados), mas o contrato e direto com os runners do Morpheus.
+Language: **English** | [Português (pt-BR)](runner-modules.pt-BR.md)
 
-## Objetivo
+This project supports local runner modules with direct integration into the executor.
+The approach is similar to MCP (decoupled modules), but the contract is native to Morpheus runners.
 
-Permitir que usuarios criem novos runners sem alterar o core, usando arquivos JavaScript locais carregados em runtime.
+## Goal
 
-## Onde colocar
+Allow users to add new runners without changing core code, using local JavaScript files loaded at runtime.
 
-Por padrao, os modulos sao lidos de:
+## Where to place modules
+
+By default, modules are loaded from:
 
 - `RUNNER_MODULES_DIR=./runner-modules`
 
-Esse diretorio e ignorado no git (`.gitignore`), entao os modulos ficam locais por ambiente.
+This directory is ignored by git (`.gitignore`), so modules stay local per environment.
 
-## Contrato do modulo
+## Module contract
 
-Cada arquivo `.js`, `.mjs` ou `.cjs` dentro do diretorio deve exportar um modulo com este formato:
+Each `.js`, `.mjs`, or `.cjs` file in the directory must export a module with this shape:
 
 ```js
-// default export (preferido)
+// preferred default export
 export default {
-  // identificador do runner (usado em /runner e no planner)
-  kind: 'meu-runner',
+  // runner identifier (used by /runner and planner)
+  kind: 'my-runner',
 
-  // opcional: metadados para orientar o planner (MCP-like)
+  // optional metadata to guide planner choice (MCP-like)
   planner: {
-    purpose: 'O que este runner faz de forma especializada.',
+    purpose: 'What this runner specializes in.',
     whenToUse: [
-      'Quando usar este runner.',
-      'Sinais/tipos de pedido em que ele e preferivel.',
+      'When this runner should be chosen.',
+      'Signals/request types where it is preferred.',
     ],
     promptRules: [
-      'Formato esperado para plan.prompt.',
-      'Ex.: "marcar <uuid> como lida".',
+      'Expected input format for plan.prompt.',
+      'Example: "mark <uuid> as read".',
     ],
     promptExamples: [
-      'listar mensagens abertas',
+      'list open messages',
       '{"action":"mark_read","id":"<uuid>"}',
     ],
   },
 
-  // obrigatorio: monta o comando executado pelo executor
+  // required: build the command executed by executor
   build({ prompt, cwd, artifactsDir, config }) {
-    const command = '/usr/local/bin/minha-cli';
+    const command = '/usr/local/bin/my-cli';
     const args = ['--cwd', cwd, '--prompt', prompt];
     const commandJson = JSON.stringify({ command, args: ['--cwd', cwd, '--prompt', '<prompt>'] });
     return { command, args, commandJson };
   },
 
-  // opcional: parse streaming JSONL/text do stdout
+  // optional: parse JSONL/text streaming stdout
   parseLine({ obj, rawLine, state }) {
     if (obj?.type === 'init') {
       return { model: obj.model, sessionId: obj.session_id, updateText: 'init' };
@@ -71,34 +73,34 @@ export default {
 };
 ```
 
-Tambem e aceito `export const runnerModule = { ... }`.
+`export const runnerModule = { ... }` is also accepted.
 
-### Metadados `planner` (recomendado)
+### `planner` metadata (recommended)
 
-Se presentes, esses campos entram no prompt do orchestrator para melhorar escolha de `runner_kind` e formato de `plan.prompt`:
+When present, these fields are injected into orchestrator prompt to improve `runner_kind` selection and `plan.prompt` formatting:
 
-- `purpose`: resumo curto da especialidade do runner.
-- `whenToUse`: lista de gatilhos/situacoes em que esse runner deve ser preferido.
-- `promptRules`: contrato de entrada esperado pelo runner.
-- `promptExamples`: exemplos de prompts validos.
+- `purpose`: short summary of runner specialty.
+- `whenToUse`: list of triggers/situations where this runner should be preferred.
+- `promptRules`: input contract expected by this runner.
+- `promptExamples`: valid prompt examples.
 
-## Regras de carregamento
+## Loading rules
 
-- O loader ignora `kind` vazio, `kind="auto"` ou modulo sem `build()`.
-- `kind` conflitando com runner nativo (`codex-cli`, `claude-cli`, `cursor-cli`, `gemini-cli`, `desktop-agent`) e ignorado.
-- Se dois modulos usarem o mesmo `kind`, o segundo e ignorado.
-- Falhas de import/execucao sao logadas e nao derrubam o servidor.
+- Loader ignores empty `kind`, `kind="auto"`, or modules without `build()`.
+- `kind` conflicting with built-ins (`codex-cli`, `claude-cli`, `cursor-cli`, `gemini-cli`, `desktop-agent`) is ignored.
+- If two modules use the same `kind`, the second one is ignored.
+- Import/runtime failures are logged and do not crash the server.
 
-## Como usar no WhatsApp
+## Usage from WhatsApp/Discord
 
-Depois de iniciar o servidor com o modulo presente:
+After starting server with module present:
 
-1. Verifique os runners disponiveis com `/runner`.
-2. Defina o modulo para usuario atual: `/runner meu-runner`.
-3. (Admin) Defina global: `/runner global meu-runner`.
+1. Check available runners with `/runner`.
+2. Set module for current user/task: `/runner my-runner`.
+3. (Admin) set global default: `/runner global my-runner`.
 
-## Observacoes
+## Notes
 
-- `build()` recebe o `config` completo do app para reutilizar variaveis de ambiente.
-- `parseLine()` e opcional, mas recomendado para atualizar progresso (`updateText`) e capturar `assistantDelta`/`finalResult`.
-- Evite incluir segredos no `commandJson`; use placeholders (`<prompt>`) quando necessario.
+- `build()` receives full app `config` for environment variable reuse.
+- `parseLine()` is optional but recommended for progress (`updateText`) and `assistantDelta`/`finalResult` extraction.
+- Avoid placing secrets inside `commandJson`; use placeholders (`<prompt>`) when needed.

@@ -1,129 +1,131 @@
 # Discord Guide (Morpheus)
 
-Este guia cobre toda a configuracao e operacao do Morpheus no Discord:
+Language: **English** | [Português (pt-BR)](discord.pt-BR.md)
 
-- conectar o bot em um ou mais servidores
-- liberar guilds no `.env`
-- habilitar canais especificos para task fixa
-- entender `DISCORD_INSTANCE_ID`
-- validar que o bot esta funcionando
+This guide covers the full Morpheus Discord setup and operation:
 
-## Como funciona no Morpheus
+- connecting the bot to one or more servers;
+- allowing guilds in `.env`;
+- enabling specific channels for fixed-task mode;
+- understanding `DISCORD_INSTANCE_ID`;
+- validating that the bot is working.
 
-- Um bot (Discord App) pode entrar em varios servidores.
-- O Morpheus so processa mensagens de guilds permitidas em `DISCORD_ALLOWED_GUILD_IDS`.
-- Em cada guild permitida, cada canal comeca desabilitado.
-- Um admin habilita o canal com `/channel-enable`.
-- Cada canal habilitado tem contexto proprio (task fixa por canal).
-- Canais nao habilitados ficam em silencio (sem resposta no chat).
+## How Discord works in Morpheus
 
-## 1) Criar/usar o Discord App (bot)
+- One bot (Discord app) can join multiple servers.
+- Morpheus only processes messages from guilds listed in `DISCORD_ALLOWED_GUILD_IDS`.
+- In each allowed guild, channels start disabled.
+- An admin enables a channel using `/channel-enable`.
+- Each enabled channel gets its own fixed task context.
+- Non-enabled channels remain silent.
 
-1. Abra o [Discord Developer Portal](https://discord.com/developers/applications).
-2. Selecione seu app existente (ou crie um novo).
-3. Em `Bot`, copie o token.
-4. Em `Bot > Privileged Gateway Intents`, habilite `Message Content Intent`.
+## 1) Create/use a Discord app (bot)
 
-## 2) Convidar o bot para um servidor
+1. Open the [Discord Developer Portal](https://discord.com/developers/applications).
+2. Select your existing app (or create a new one).
+3. In `Bot`, copy the token.
+4. In `Bot > Privileged Gateway Intents`, enable `Message Content Intent`.
 
-1. No app, abra `OAuth2 > URL Generator`.
-2. Em `Scopes`, marque `bot`.
-3. Em `Bot Permissions`, marque pelo menos:
+## 2) Invite the bot to a server
+
+1. In the app, open `OAuth2 > URL Generator`.
+2. Under `Scopes`, select `bot`.
+3. Under `Bot Permissions`, grant at least:
    - `View Channels`
    - `Send Messages`
    - `Read Message History`
-4. Abra a URL gerada e escolha o servidor.
+4. Open the generated URL and choose the server.
 
-## 3) Pegar Guild ID e User ID
+## 3) Get Guild ID and User ID
 
-1. No Discord, ative `User Settings > Advanced > Developer Mode`.
-2. `Guild ID`: clique com botao direito no nome do servidor -> `Copy Server ID`.
-3. `User ID`: clique com botao direito no seu usuario -> `Copy User ID`.
+1. In Discord, enable `User Settings > Advanced > Developer Mode`.
+2. `Guild ID`: right-click server name -> `Copy Server ID`.
+3. `User ID`: right-click your user -> `Copy User ID`.
 
-## 4) Configurar `.env`
+## 4) Configure `.env`
 
-Arquivo: `/Users/matheus/development/development/morpheus/.env`
+File: `/Users/matheus/development/development/morpheus/.env`
 
 ```env
 DISCORD_ENABLED=true
-DISCORD_BOT_TOKEN=SEU_TOKEN
+DISCORD_BOT_TOKEN=YOUR_TOKEN
 DISCORD_ALLOWED_GUILD_IDS=111111111111111111,222222222222222222
 DISCORD_ADMIN_USER_IDS=999999999999999999
 DISCORD_INSTANCE_ID=morpheus-discord
 DISCORD_MESSAGE_MAX_LENGTH=1900
 ```
 
-Notas:
+Notes:
 
-- `DISCORD_ALLOWED_GUILD_IDS`: pode conter varios servidores (CSV).
-- `DISCORD_ADMIN_USER_IDS`: usuarios que podem executar comandos admin no Discord.
-- `DISCORD_INSTANCE_ID`: identificador interno para deduplicacao de mensagens.
-  - Nao vem do Discord.
-  - Pode manter `morpheus-discord`.
-  - So mude se rodar multiplas instancias do Morpheus no mesmo banco.
+- `DISCORD_ALLOWED_GUILD_IDS`: supports multiple servers (CSV).
+- `DISCORD_ADMIN_USER_IDS`: users allowed to run admin commands in Discord.
+- `DISCORD_INSTANCE_ID`: internal message deduplication identifier.
+  - It is not provided by Discord.
+  - You can keep `morpheus-discord`.
+  - Change it only if you run multiple Morpheus instances on the same database.
 
-## 5) Reiniciar o Morpheus
+## 5) Restart Morpheus
 
-No diretorio do projeto:
+From the project directory:
 
 ```bash
 npm run dev
 ```
 
-Nos logs, confirme que o cliente Discord conectou.
+Confirm in logs that Discord client is connected.
 
-## 6) Habilitar canais (task fixa por canal)
+## 6) Enable channels (fixed task per channel)
 
-No canal que deve operar tasks:
+In the channel that should run tasks:
 
 ```text
 /channel-enable
 ```
 
-Opcionalmente, ja definindo projeto e runner:
+Optionally set project and runner at the same time:
 
 ```text
 /channel-enable <projectId> <runnerKind>
 ```
 
-Exemplo:
+Example:
 
 ```text
 /channel-enable morpheus codex-cli
 ```
 
-Comandos uteis:
+Useful commands:
 
-- `/channel-info` -> mostra status do canal, task foco, projeto e runner
-- `/channel-disable` -> desabilita o canal
-- `/new` -> reseta a task do canal (cria nova task foco)
+- `/channel-info` -> shows channel status, focused task, project, and runner.
+- `/channel-disable` -> disables the channel.
+- `/new` -> resets channel context by creating a new focused task.
 
-## 7) Um bot em varios servidores
+## 7) One bot across many servers
 
-Pode usar o mesmo Discord App/Bot em varios servidores:
+You can use the same Discord app/bot in multiple servers:
 
-1. Convide o bot em cada servidor.
-2. Adicione os novos guild IDs em `DISCORD_ALLOWED_GUILD_IDS`.
-3. Reinicie o Morpheus.
-4. Rode `/channel-enable` nos canais desejados de cada servidor.
+1. Invite the bot to each server.
+2. Add new guild IDs to `DISCORD_ALLOWED_GUILD_IDS`.
+3. Restart Morpheus.
+4. Run `/channel-enable` in desired channels of each server.
 
-## 8) Comportamento importante
+## 8) Important behavior
 
-- O bot nao roda automaticamente em todos os canais.
-- Apenas canais habilitados com `/channel-enable` processam mensagens.
-- Canais nao habilitados ficam em silencio.
-- WhatsApp continua funcionando em paralelo.
+- The bot does not run automatically in all channels.
+- Only channels enabled with `/channel-enable` are processed.
+- Non-enabled channels stay silent.
+- WhatsApp keeps working in parallel.
 
-## 9) Troubleshooting rapido
+## 9) Quick troubleshooting
 
-- Bot online e sem responder em nenhum lugar:
-  - confira `DISCORD_ENABLED=true`
-  - confira `DISCORD_BOT_TOKEN`
-  - confira `DISCORD_ALLOWED_GUILD_IDS`
-  - confira `Message Content Intent` habilitado
-- Responde em um servidor e ignora outro:
-  - faltou incluir o guild ID novo no `.env`
-- Comando admin negado:
-  - seu user ID nao esta em `DISCORD_ADMIN_USER_IDS`
-- Duplicidade de resposta:
-  - evite duas instancias do Morpheus rodando com o mesmo token ao mesmo tempo
+- Bot is online but does not reply anywhere:
+  - check `DISCORD_ENABLED=true`;
+  - check `DISCORD_BOT_TOKEN`;
+  - check `DISCORD_ALLOWED_GUILD_IDS`;
+  - check that `Message Content Intent` is enabled.
+- It replies in one server and ignores another:
+  - likely missing guild ID in `.env`.
+- Admin command denied:
+  - your user ID is not in `DISCORD_ADMIN_USER_IDS`.
+- Duplicate replies:
+  - avoid running multiple Morpheus instances with the same bot token at once.
