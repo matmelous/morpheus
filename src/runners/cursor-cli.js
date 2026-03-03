@@ -29,11 +29,11 @@ function summarizeToolCall(toolCall) {
   if (!toolCall || typeof toolCall !== 'object') return null;
   if (toolCall.readToolCall?.args?.path) {
     const p = String(toolCall.readToolCall.args.path);
-    return `Read: ${p.split('/').pop()}`;
+    return `Read: ${p.split(/[\\/]/).pop()}`;
   }
   if (toolCall.editToolCall?.args?.path) {
     const p = String(toolCall.editToolCall.args.path);
-    return `Edit: ${p.split('/').pop()}`;
+    return `Edit: ${p.split(/[\\/]/).pop()}`;
   }
   if (toolCall.bashToolCall?.args?.command) {
     const c = String(toolCall.bashToolCall.args.command);

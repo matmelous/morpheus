@@ -32,7 +32,7 @@ export function geminiParseLine({ obj }) {
 
   if (obj.type === 'tool_use') {
     const name = obj.tool_name || 'tool';
-    const fp = obj.parameters?.file_path ? String(obj.parameters.file_path).split('/').pop() : '';
+    const fp = obj.parameters?.file_path ? String(obj.parameters.file_path).split(/[\\/]/).pop() : '';
     return { updateText: `tool:${name}${fp ? ` ${fp}` : ''}`, usage };
   }
 

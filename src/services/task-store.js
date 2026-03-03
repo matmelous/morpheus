@@ -537,6 +537,118 @@ class TaskStore {
     ).get(String(channelId || '').trim());
     return Number(row?.enabled || 0) === 1;
   }
+
+  // --- LongRun session CRUD ---
+
+  /**
+   * Creates a new LongRun session record.
+   * @param {object} params
+   * @param {string} params.id - UUID v4 session identifier
+   * @param {string} params.phone
+   * @param {string} params.taskId - Morpheus task_id this session is attached to
+   * @param {string} params.projectId
+   * @param {string} params.projectCwd - Absolute path to the project root
+   * @param {string} [params.featureUuid] - UUID v4 of the feature (from planner)
+   * @param {string} [params.featureTitle]
+   * @param {string} [params.specJson] - JSON-stringified spec (partial or full)
+   * @param {string} [params.preferredRunner] - Forced runner kind (if user specified)
+   * @param {string[]} [params.runnerPriority] - Ordered array of runner kinds
+   * @returns {object} The created session row
+   */
+  createLongrunSession({
+    id,
+    phone,
+    taskId,
+    projectId,
+    projectCwd,
+    featureUuid = null,
+    featureTitle = null,
+    specJson = null,
+    preferredRunner = null,
+    runnerPriority = null,
+  }) {
+    const now = nowIso();
+    this.db.prepare(`
+      INSERT INTO longrun_sessions
+        (id, phone, task_id, project_id, project_cwd, status,
+         feature_uuid, feature_title, spec_json,
+         current_task_uuid, auto_correct_attempt,
+         preferred_runner, runner_priority, created_at, updated_at)
+      VALUES
+        (?, ?, ?, ?, ?, 'gathering',
+         ?, ?, ?,
+         NULL, 0,
+         ?, ?, ?, ?)
+    `).run(
+      id, phone, taskId, projectId, projectCwd,
+      featureUuid || null,
+      featureTitle || null,
+      specJson ? String(specJson) : null,
+      preferredRunner || null,
+      runnerPriority ? JSON.stringify(runnerPriority) : null,
+      now, now
+    );
+    return this.getLongrunSession(id);
+  }
+
+  /**
+   * Returns a LongRun session by its primary key id.
+   * @param {string} id
+   * @returns {object|null}
+   */
+  getLongrunSession(id) {
+    return this.db.prepare('SELECT * FROM longrun_sessions WHERE id = ?').get(id) || null;
+  }
+
+  /**
+   * Returns the most recent LongRun session for a given Morpheus task_id.
+   * @param {string} taskId
+   * @returns {object|null}
+   */
+  getLongrunSessionByTaskId(taskId) {
+    return this.db.prepare(
+      'SELECT * FROM longrun_sessions WHERE task_id = ? ORDER BY created_at DESC LIMIT 1'
+    ).get(taskId) || null;
+  }
+
+  /**
+   * Returns the most recent active LongRun session for a phone number.
+   * Active = status in (gathering, confirming, running, paused).
+   * @param {string} phone
+   * @returns {object|null}
+   */
+  getActiveLongrunSessionForPhone(phone) {
+    return this.db.prepare(`
+      SELECT * FROM longrun_sessions
+      WHERE phone = ? AND status IN ('gathering', 'confirming', 'running', 'paused')
+      ORDER BY created_at DESC LIMIT 1
+    `).get(phone) || null;
+  }
+
+  /**
+   * Updates allowed fields on a LongRun session row.
+   * Always updates updated_at.
+   * @param {string} id - Session UUID
+   * @param {object} updates - Fields to update (subset of allowed columns)
+   */
+  updateLongrunSession(id, updates) {
+    const allowed = [
+      'status',
+      'feature_uuid',
+      'feature_title',
+      'spec_json',
+      'current_task_uuid',
+      'auto_correct_attempt',
+      'preferred_runner',
+      'runner_priority',
+    ];
+    const keys = Object.keys(updates).filter((k) => allowed.includes(k));
+    if (keys.length === 0) return;
+
+    const sets = [...keys.map((k) => `${k} = ?`), 'updated_at = ?'].join(', ');
+    const values = [...keys.map((k) => updates[k]), nowIso(), id];
+    this.db.prepare(`UPDATE longrun_sessions SET ${sets} WHERE id = ?`).run(...values);
+  }
 }
 
 export const taskStore = new TaskStore();

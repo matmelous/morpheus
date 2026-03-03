@@ -2,6 +2,7 @@ import dotenv from 'dotenv';
 import { z } from 'zod';
 import { dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
+import os from 'node:os';
 import { parseBool, parseCsvList } from '../utils/text.js';
 
 dotenv.config();
@@ -14,12 +15,25 @@ const OrchestratorProviderSchema = z.enum(['gemini-cli', 'openrouter', 'auto']);
 const TokenEstimatorModeSchema = z.enum(['provider_fallback_estimate']);
 const TokenNotificationLevelSchema = z.enum(['summary']);
 
+function getDefaultDevelopmentRoot() {
+  return resolve(os.homedir(), 'development');
+}
+
+function normalizeCliCommandForPlatform(value) {
+  const command = String(value || '').trim();
+  if (!command) return '';
+  if (process.platform !== 'win32') return command;
+  if (/[\\/]/.test(command)) return command;
+  if (/\.[a-z0-9]+$/i.test(command)) return command;
+  return `${command}.cmd`;
+}
+
 const EnvSchema = z.object({
   APP_PORT: z.coerce.number().int().positive().default(3200),
   NODE_ENV: z.string().default('development'),
   LOG_LEVEL: z.string().default('info'),
 
-  DEVELOPMENT_ROOT: z.string().optional().default('/Users/matheus/development/development'),
+  DEVELOPMENT_ROOT: z.string().optional().default(getDefaultDevelopmentRoot()),
 
   WHATSAPP_INSTANCE_ID: z.string().optional().default('morpheus-standalone'),
   WHATSAPP_AUTH_DIR: z.string().optional().default('./data/whatsapp-auth'),
@@ -142,7 +156,7 @@ export const config = {
   },
 
   gemini: {
-    command: env.GEMINI_CLI_COMMAND || 'gemini',
+    command: normalizeCliCommandForPlatform(env.GEMINI_CLI_COMMAND || 'gemini'),
     model: env.GEMINI_MODEL,
     outputFormat: env.GEMINI_OUTPUT_FORMAT,
     approvalMode: env.GEMINI_APPROVAL_MODE,
@@ -152,7 +166,7 @@ export const config = {
   runnerModulesDir: resolve(appRoot, env.RUNNER_MODULES_DIR),
 
   claude: {
-    command: env.CLAUDE_CLI_COMMAND || 'claude',
+    command: normalizeCliCommandForPlatform(env.CLAUDE_CLI_COMMAND || 'claude'),
     model: env.CLAUDE_MODEL,
     permissionMode: env.CLAUDE_PERMISSION_MODE,
     outputFormat: env.CLAUDE_OUTPUT_FORMAT,
@@ -160,14 +174,14 @@ export const config = {
   },
 
   codex: {
-    command: env.CODEX_CLI_COMMAND || 'codex',
+    command: normalizeCliCommandForPlatform(env.CODEX_CLI_COMMAND || 'codex'),
     sandboxMode: env.CODEX_SANDBOX_MODE,
     skipGitRepoCheck: parseBool(env.CODEX_SKIP_GIT_REPO_CHECK, true),
     useDangerouslyBypassApprovals: parseBool(env.CODEX_USE_DANGEROUSLY_BYPASS_APPROVALS, false),
   },
 
   cursor: {
-    command: env.CURSOR_AGENT_COMMAND || 'cursor-agent',
+    command: normalizeCliCommandForPlatform(env.CURSOR_AGENT_COMMAND || 'cursor-agent'),
     outputFormat: env.CURSOR_OUTPUT_FORMAT,
     model: env.CURSOR_MODEL,
     force: parseBool(env.CURSOR_FORCE, true),

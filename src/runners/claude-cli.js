@@ -45,7 +45,7 @@ function summarizeToolUseBlocks(blocks) {
     }
     if ((name === 'Read' || name === 'Edit' || name === 'Write') && input.file_path) {
       const fp = String(input.file_path);
-      summaries.push(`${name}: ${fp.split('/').pop()}`);
+      summaries.push(`${name}: ${fp.split(/[\\/]/).pop()}`);
       continue;
     }
     if (name === 'Glob' && input.pattern) {

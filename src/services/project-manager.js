@@ -25,7 +25,7 @@ class ProjectManager {
     const s = String(repoUrl || '').trim();
     if (!s) return '';
     const withoutQuery = s.split('?')[0];
-    const last = withoutQuery.replace(/\/+$/, '').split('/').pop() || '';
+    const last = withoutQuery.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || '';
     return last.endsWith('.git') ? last.slice(0, -4) : last;
   }
 

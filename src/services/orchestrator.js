@@ -82,6 +82,7 @@ function buildPlannerPromptPayload({
   runnerCatalog,
   projects,
   sharedMemory,
+  longrunSession,
 }) {
   const { system, user } = buildPlannerMessages({
     userMessage,
@@ -94,6 +95,7 @@ function buildPlannerPromptPayload({
     runnerCatalog,
     projects,
     sharedMemory,
+    longrunSession,
   });
 
   return {
@@ -108,6 +110,7 @@ export async function orchestrateTaskMessage({
   task,
   userMessage,
   preferredRunnerKind,
+  longrunSession = null,
 }) {
   const user = taskStore.getUser(phone);
   const originalSharedMemory = taskStore.getUserSharedMemory(phone)?.content || '';
@@ -170,6 +173,7 @@ export async function orchestrateTaskMessage({
     runnerCatalog,
     projects: projectManager.listProjects(),
     sharedMemory: effectiveSharedMemory,
+    longrunSession,
   });
   const projectedBeforeCompaction = promptPayload.estimatedInputTokens;
 
@@ -198,6 +202,7 @@ export async function orchestrateTaskMessage({
       runnerCatalog,
       projects: projectManager.listProjects(),
       sharedMemory: effectiveSharedMemory,
+      longrunSession,
     });
 
     logBudgetCompaction({

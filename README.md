@@ -95,8 +95,8 @@ Recommended approach: keep modules in a **separate repository** and point `RUNNE
 Example:
 
 1. Create a dedicated repository, e.g. `morpheus-runner-modules`.
-2. Clone it somewhere else, e.g. `/Users/your-user/dev/morpheus-runner-modules`.
-3. In Morpheus, set `.env.local`: `RUNNER_MODULES_DIR=/Users/your-user/dev/morpheus-runner-modules`.
+2. Clone it somewhere else, e.g. `/path/to/morpheus-runner-modules` (Linux/macOS) or `C:\dev\morpheus-runner-modules` (Windows).
+3. In Morpheus, set `.env.local`: `RUNNER_MODULES_DIR=/path/to/morpheus-runner-modules`.
 4. Version modules in the dedicated repo (branches/tags/releases), without polluting Morpheus core history.
 
 Benefits:
@@ -115,6 +115,11 @@ Optional for GUI automation on macOS:
 
 - `brew install cliclick`;
 - `brew install tesseract`.
+
+Windows note:
+
+- keep CLI command vars empty in `.env` to use executables from `PATH`;
+- `desktop-agent` supports web automation on Windows, but macOS-only `mac_*` GUI tools are not available.
 
 macOS permissions:
 

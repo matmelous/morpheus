@@ -95,8 +95,8 @@ Recomendado: manter os módulos em **repositório separado** e apontar `RUNNER_M
 Exemplo:
 
 1. Criar repositório próprio, ex.: `morpheus-runner-modules` (público ou privado).
-2. Clonar em outro caminho local, ex.: `/Users/seu-usuario/dev/morpheus-runner-modules`.
-3. No Morpheus, definir no `.env.local`: `RUNNER_MODULES_DIR=/Users/seu-usuario/dev/morpheus-runner-modules`.
+2. Clonar em outro caminho local, ex.: `/caminho/para/morpheus-runner-modules` (Linux/macOS) ou `C:\dev\morpheus-runner-modules` (Windows).
+3. No Morpheus, definir no `.env.local`: `RUNNER_MODULES_DIR=/caminho/para/morpheus-runner-modules`.
 4. Versionar os módulos nesse repositório dedicado (branches, tags e releases), sem poluir o `morpheus`.
 
 Vantagens:
@@ -115,6 +115,11 @@ Opcional para automação GUI no macOS:
 
 - `brew install cliclick`;
 - `brew install tesseract`.
+
+Observação para Windows:
+
+- deixe variáveis de comando de CLI vazias no `.env` para usar executáveis do `PATH`;
+- no Windows, o `desktop-agent` suporta automação web, mas ferramentas `mac_*` de GUI nativa não estão disponíveis.
 
 Permissões do macOS:
 
