@@ -9,6 +9,9 @@ import { config } from '../config/index.js';
 import { taskStore } from './task-store.js';
 import { logger } from '../utils/logger.js';
 
+/** Discord API limit for message content (characters). */
+const DISCORD_API_MAX_CONTENT = 2000;
+
 const DEFAULT_MAX_MESSAGE_LENGTH = 1900;
 const UNSUPPORTED_ATTACHMENTS_MESSAGE = '📎 Anexos ainda nao sao suportados nesta versao do Discord. Envie texto por enquanto.';
 
@@ -17,25 +20,31 @@ let startupPromise = null;
 let inboundMessageHandler = null;
 let stopRequested = false;
 
-function splitMessage(text, maxLength = DEFAULT_MAX_MESSAGE_LENGTH) {
+/**
+ * Splits text into chunks of at most maxLength, preferring newline then space boundaries.
+ * No chunk will exceed maxLength (Discord will truncate above 2000).
+ */
+export function splitMessage(text, maxLength = DEFAULT_MAX_MESSAGE_LENGTH) {
+  const limit = Math.min(Math.max(1, Number(maxLength) || DEFAULT_MAX_MESSAGE_LENGTH), DISCORD_API_MAX_CONTENT);
   const s = String(text || '');
   if (!s) return [''];
-  if (s.length <= maxLength) return [s];
+  if (s.length <= limit) return [s];
 
   const parts = [];
   let remaining = s;
 
   while (remaining.length > 0) {
-    if (remaining.length <= maxLength) {
+    if (remaining.length <= limit) {
       parts.push(remaining);
       break;
     }
 
-    let splitAt = remaining.lastIndexOf('\n', maxLength);
-    if (splitAt === -1 || splitAt < maxLength * 0.3) splitAt = remaining.lastIndexOf(' ', maxLength);
-    if (splitAt === -1 || splitAt < maxLength * 0.3) splitAt = maxLength;
+    let splitAt = remaining.lastIndexOf('\n', limit);
+    if (splitAt === -1 || splitAt < limit * 0.3) splitAt = remaining.lastIndexOf(' ', limit);
+    if (splitAt === -1 || splitAt < limit * 0.3) splitAt = limit;
 
-    parts.push(remaining.slice(0, splitAt));
+    const part = remaining.slice(0, splitAt).slice(0, limit);
+    parts.push(part);
     remaining = remaining.slice(splitAt).trimStart();
   }
 

@@ -8,6 +8,9 @@ import os from 'node:os';
 import { chromium } from 'playwright';
 import { detectPurchaseIntent, parseFirstJsonObject } from './desktop-agent-utils.js';
 
+const isMac = process.platform === 'darwin';
+const isWindows = process.platform === 'win32';
+
 function nowIso() {
   return new Date().toISOString();
 }
@@ -29,7 +32,11 @@ function parseArgs(argv) {
 }
 
 function which(cmd) {
-  const r = spawnSync('bash', ['-lc', `command -v ${cmd} >/dev/null 2>&1`], { stdio: 'ignore' });
+  if (!cmd) return false;
+  const r = isWindows
+    ? spawnSync('where', [cmd], { stdio: 'ignore' })
+    : spawnSync('which', [cmd], { stdio: 'ignore' });
+  if (r.error) return false;
   return r.status === 0;
 }
 
@@ -58,8 +65,11 @@ const ActionSchema = z.object({
 });
 
 function loadChromeProfiles() {
-  // macOS Chrome profiles are described in "Local State" (JSON).
-  const localStatePath = resolve(os.homedir(), 'Library', 'Application Support', 'Google', 'Chrome', 'Local State');
+  const localStatePath = isMac
+    ? resolve(os.homedir(), 'Library', 'Application Support', 'Google', 'Chrome', 'Local State')
+    : isWindows
+      ? resolve(process.env.LOCALAPPDATA || resolve(os.homedir(), 'AppData', 'Local'), 'Google', 'Chrome', 'User Data', 'Local State')
+      : resolve(os.homedir(), '.config', 'google-chrome', 'Local State');
   const json = safeJsonRead(localStatePath);
   const infoCache = json?.profile?.info_cache && typeof json.profile.info_cache === 'object'
     ? json.profile.info_cache
@@ -147,16 +157,32 @@ async function openRouterChat({ systemPrompt, userPrompt, model, apiKey, baseUrl
 }
 
 function buildSystemPrompt() {
+  const platformName = isMac ? 'macOS' : isWindows ? 'Windows' : 'Linux';
+  const toolNames = [
+    'web_open',
+    'web_click',
+    'web_type',
+    'web_press',
+    'web_extract_text',
+    'web_screenshot',
+    'chrome_list_profiles',
+    ...(isMac ? ['chrome_open_profile', 'mac_screenshot', 'mac_ocr', 'mac_open_app', 'mac_focus_app', 'mac_click', 'mac_type', 'mac_key'] : []),
+    'shell',
+    'final',
+  ].join('|');
+
   return [
-    'Voce e um agente de automacao no macOS.',
-    'Voce pode controlar um browser isolado (Playwright) e tambem o Chrome real do sistema (com perfis logados) via GUI.',
-    'Para tarefas que dependem de contas ja logadas (ex.: Google Chat no perfil "ogi"), prefira usar o Chrome real com o perfil correto.',
+    `Voce e um agente de automacao em ${platformName}.`,
+    'Voce pode controlar um browser isolado (Playwright).',
+    isMac
+      ? 'No macOS, voce tambem pode controlar o Chrome real do sistema (com perfis logados) via GUI.'
+      : 'Ferramentas de GUI nativas (mac_*) nao estao disponiveis fora do macOS.',
     'Sua resposta DEVE ser APENAS um JSON valido (sem markdown, sem texto extra).',
     '',
     'Formato esperado:',
     '{',
     '  "thought": "curto",',
-    '  "tool": "web_open|web_click|web_type|web_press|web_extract_text|web_screenshot|chrome_list_profiles|chrome_open_profile|mac_screenshot|mac_ocr|mac_open_app|mac_focus_app|mac_click|mac_type|mac_key|shell|final",',
+    `  "tool": "${toolNames}",`,
     '  "args": { ... },',
     '  "need_confirmation": false,',
     '  "final_text": "quando tool=final"',
@@ -164,10 +190,18 @@ function buildSystemPrompt() {
     '',
     'Regras:',
     '- Seja web-first: use Playwright sempre que possivel.',
-    '- Se o pedido mencionar um perfil do Chrome (ex.: "perfil da ogi"), use chrome_open_profile e entao navegue no Chrome real via GUI (screenshots + OCR + cliques).',
-    '- chrome_open_profile args: {"name": "<nome do perfil>"} (ex.: {"name":"ogi"}).',
-    '- Evite usar tool "shell" para navegar no Chrome; prefira mac_screenshot + mac_ocr + mac_click/mac_type/mac_key.',
-    '- Use mac_* apenas quando for necessario (apps nativos, browser real do sistema, etc.).',
+    isMac
+      ? '- Se o pedido mencionar um perfil do Chrome (ex.: "perfil da ogi"), use chrome_open_profile e entao navegue no Chrome real via GUI (screenshots + OCR + cliques).'
+      : '- Fora do macOS, use somente web_* e shell.',
+    isMac
+      ? '- chrome_open_profile args: {"name": "<nome do perfil>"} (ex.: {"name":"ogi"}).'
+      : '- chrome_open_profile nao esta disponivel fora do macOS.',
+    isMac
+      ? '- Evite usar tool "shell" para navegar no Chrome; prefira mac_screenshot + mac_ocr + mac_click/mac_type/mac_key.'
+      : '- Evite usar tool "shell" quando o fluxo puder ser resolvido com web_*.',
+    isMac
+      ? '- Use mac_* apenas quando for necessario (apps nativos, browser real do sistema, etc.).'
+      : '- Nao use ferramentas mac_* fora do macOS.',
     '- Se perceber que a proxima acao pode finalizar compra/pagamento/checkout, coloque need_confirmation=true e NAO execute a compra.',
     '- Quando tool="final", preencha final_text com a resposta ao usuario (PT-BR) e inclua onde estao as evidencias (prints).',
   ].join('\n');
@@ -184,7 +218,9 @@ function safeShellAllowed(cmd) {
   if (!s) return false;
   if (s.includes('rm -rf') || s.includes('sudo') || s.includes('shutdown') || s.includes('reboot')) return false;
   // Keep this list tight. Prefer adding specific tools over opening up a general shell.
-  const allow = ['rg', 'jq', 'curl', 'python', 'python3', 'node', 'open', 'osascript'];
+  const allow = ['rg', 'jq', 'curl', 'python', 'python3', 'node'];
+  if (isMac) allow.push('open', 'osascript');
+  if (isWindows) allow.push('powershell', 'pwsh', 'where', 'start');
   const first = s.split(/\s+/)[0];
   return allow.includes(first);
 }
@@ -206,14 +242,14 @@ async function main() {
   const baseUrl = env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1';
   const model = env.OPENROUTER_MODEL || 'google/gemini-3-pro-preview';
 
-  const hasCliclick = which('cliclick');
+  const hasCliclick = isMac ? which('cliclick') : false;
   const hasTesseract = which('tesseract');
   const chromeProfiles = loadChromeProfiles();
 
   logEvent({ type: 'model', model });
   logEvent({
     type: 'update',
-    text: `desktop-agent: start (cliclick=${hasCliclick ? 'yes' : 'no'}, tesseract=${hasTesseract ? 'yes' : 'no'}, chromeProfiles=${chromeProfiles.profiles.length})`,
+    text: `desktop-agent: start (platform=${process.platform}, cliclick=${hasCliclick ? 'yes' : 'no'}, tesseract=${hasTesseract ? 'yes' : 'no'}, chromeProfiles=${chromeProfiles.profiles.length})`,
   });
 
   const browser = await chromium.launch({ headless: false });
@@ -241,9 +277,13 @@ async function main() {
     return p;
   }
 
-  async function mac_screenshot(name, caption) {
+  async function desktop_screenshot(name, caption) {
     const p = resolve(evidenceDir, name);
-    execText('screencapture', ['-x', p]);
+    if (isMac) {
+      execText('screencapture', ['-x', p]);
+    } else {
+      await page.screenshot({ path: p, fullPage: true });
+    }
     addEvidence(p, caption);
     return p;
   }
@@ -277,7 +317,7 @@ async function main() {
 
     // Always keep a desktop screenshot at the start and after major changes.
     if (state.step === 0) {
-      const p = await mac_screenshot(`step-${String(state.step).padStart(4, '0')}-desktop.png`, 'Desktop (inicio)');
+      const p = await desktop_screenshot(`step-${String(state.step).padStart(4, '0')}-desktop.png`, isMac ? 'Desktop (inicio)' : 'Browser (inicio)');
       state.desktopOcr = await maybeOcrDesktop(p);
     }
   }
@@ -341,13 +381,15 @@ async function main() {
     }
 
     if (tool === 'mac_screenshot') {
+      if (!isMac) throw new Error('mac_screenshot is only available on macOS');
       const name = String(args?.name || `step-${String(state.step).padStart(4, '0')}-desktop.png`);
-      const p = await mac_screenshot(name, String(args?.caption || 'Desktop screenshot'));
+      const p = await desktop_screenshot(name, String(args?.caption || 'Desktop screenshot'));
       state.desktopOcr = await maybeOcrDesktop(p);
       return { ok: true };
     }
 
     if (tool === 'mac_ocr') {
+      if (!isMac) throw new Error('mac_ocr is only available on macOS');
       const imagePath = String(args?.imagePath || '').trim();
       if (!imagePath) throw new Error('mac_ocr: missing imagePath');
       const r = await tesseractTsv(imagePath);
@@ -355,52 +397,59 @@ async function main() {
     }
 
     if (tool === 'mac_open_app') {
+      if (!isMac) throw new Error('mac_open_app is only available on macOS');
       const appName = String(args?.app || args?.appName || '').trim();
       if (!appName) throw new Error('mac_open_app: missing app');
       execText('osascript', ['-e', `tell application "${appName}" to activate`]);
-      await mac_screenshot(`step-${String(state.step).padStart(4, '0')}-desktop.png`, `App: ${appName}`);
+      await desktop_screenshot(`step-${String(state.step).padStart(4, '0')}-desktop.png`, `App: ${appName}`);
       return { ok: true };
     }
 
     if (tool === 'mac_focus_app') {
+      if (!isMac) throw new Error('mac_focus_app is only available on macOS');
       const appName = String(args?.app || args?.appName || '').trim();
       if (!appName) throw new Error('mac_focus_app: missing app');
       execText('osascript', ['-e', `tell application "${appName}" to activate`]);
-      await mac_screenshot(`step-${String(state.step).padStart(4, '0')}-desktop.png`, `Focus: ${appName}`);
+      await desktop_screenshot(`step-${String(state.step).padStart(4, '0')}-desktop.png`, `Focus: ${appName}`);
       return { ok: true };
     }
 
     if (tool === 'mac_click') {
+      if (!isMac) throw new Error('mac_click is only available on macOS');
       if (!hasCliclick) throw new Error('cliclick not installed (mac_click)');
       const x = Number(args?.x);
       const y = Number(args?.y);
       if (!Number.isFinite(x) || !Number.isFinite(y)) throw new Error('mac_click: missing x,y');
       execText('cliclick', [`c:${Math.round(x)},${Math.round(y)}`]);
-      await mac_screenshot(`step-${String(state.step).padStart(4, '0')}-desktop.png`, `Click: ${x},${y}`);
+      await desktop_screenshot(`step-${String(state.step).padStart(4, '0')}-desktop.png`, `Click: ${x},${y}`);
       return { ok: true };
     }
 
     if (tool === 'mac_type') {
+      if (!isMac) throw new Error('mac_type is only available on macOS');
       if (!hasCliclick) throw new Error('cliclick not installed (mac_type)');
       const text = String(args?.text ?? '');
       execText('cliclick', [`t:${text}`]);
-      await mac_screenshot(`step-${String(state.step).padStart(4, '0')}-desktop.png`, 'Type');
+      await desktop_screenshot(`step-${String(state.step).padStart(4, '0')}-desktop.png`, 'Type');
       return { ok: true };
     }
 
     if (tool === 'mac_key') {
+      if (!isMac) throw new Error('mac_key is only available on macOS');
       if (!hasCliclick) throw new Error('cliclick not installed (mac_key)');
       const combo = String(args?.key || args?.combo || '').trim();
       if (!combo) throw new Error('mac_key: missing key');
       execText('cliclick', [`kp:${combo}`]);
-      await mac_screenshot(`step-${String(state.step).padStart(4, '0')}-desktop.png`, `Key: ${combo}`);
+      await desktop_screenshot(`step-${String(state.step).padStart(4, '0')}-desktop.png`, `Key: ${combo}`);
       return { ok: true };
     }
 
     if (tool === 'shell') {
       const command = String(args?.command || '').trim();
       if (!safeShellAllowed(command)) throw new Error('shell: command not allowed');
-      const child = spawn('bash', ['-lc', command], { cwd, env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
+      const shellCommand = isWindows ? 'cmd.exe' : (process.env.SHELL || 'bash');
+      const shellArgs = isWindows ? ['/d', '/s', '/c', command] : ['-lc', command];
+      const child = spawn(shellCommand, shellArgs, { cwd, env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
       let stdout = '';
       let stderr = '';
       await new Promise((resolveP, rejectP) => {
@@ -420,6 +469,7 @@ async function main() {
     }
 
     if (tool === 'chrome_open_profile') {
+      if (!isMac) throw new Error('chrome_open_profile is only available on macOS');
       if (!hasCliclick) throw new Error('cliclick not installed (chrome_open_profile)');
       const profileName = String(args?.name || args?.profile || '').trim();
       if (!profileName) throw new Error('chrome_open_profile: missing name');
@@ -452,7 +502,7 @@ async function main() {
       // Give the UI a moment to render.
       await new Promise((r) => setTimeout(r, 1200));
 
-      const shotPath = await mac_screenshot(`step-${String(state.step).padStart(4, '0')}-chrome-profiles.png`, 'Chrome profile picker');
+      const shotPath = await desktop_screenshot(`step-${String(state.step).padStart(4, '0')}-chrome-profiles.png`, 'Chrome profile picker');
       const ocr = await tesseractTsv(shotPath);
       const hit = findOcrHit(ocr.boxes, profileName);
       if (!hit) {
@@ -490,7 +540,7 @@ async function main() {
         end tell
       `.trim()]);
 
-      await mac_screenshot(`step-${String(state.step).padStart(4, '0')}-chrome-opened.png`, `Chrome profile opened: ${profileName}`);
+      await desktop_screenshot(`step-${String(state.step).padStart(4, '0')}-chrome-opened.png`, `Chrome profile opened: ${profileName}`);
       return { ok: true, profileName, click: { x: cx, y: cy }, screenshot: shotPath };
     }
 

@@ -44,7 +44,7 @@ Este guia cobre toda a configuração e operação do Morpheus no Discord:
 
 ## 4) Configurar `.env`
 
-Arquivo: `/Users/matheus/development/development/morpheus/.env`
+Arquivo: `<raiz-do-morpheus>/.env`
 
 ```env
 DISCORD_ENABLED=true

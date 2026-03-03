@@ -32,7 +32,12 @@ function safeJsonParse(line) {
 
 function isQuotaLine(line) {
   const s = String(line || '');
-  return s.includes("You've hit your usage limit") || s.includes('usage limit');
+  return (
+    s.includes("You've hit your usage limit") ||
+    s.includes("You've hit your limit") ||
+    s.includes('hit your limit') ||
+    s.includes('usage limit')
+  );
 }
 
 function writeJson(path, value) {
@@ -76,6 +81,25 @@ function readLastNonEmptyLine(path, maxBytes = 32_768) {
   }
 }
 
+/** Reads stderr and last stdout line to check for quota/rate-limit messages (e.g. when not seen line-by-line). */
+function getRunOutputForQuotaCheck(artifactsDir) {
+  try {
+    const stderrPath = resolve(artifactsDir, 'stderr.log');
+    const stdoutPath = resolve(artifactsDir, 'stdout.jsonl');
+    let text = '';
+    if (existsSync(stderrPath)) {
+      const buf = readFileSync(stderrPath);
+      const slice = buf.length > 8192 ? buf.subarray(buf.length - 8192) : buf;
+      text += slice.toString('utf-8');
+    }
+    const lastStdout = readLastNonEmptyLine(stdoutPath, 4096);
+    if (lastStdout) text += '\n' + lastStdout;
+    return text;
+  } catch {
+    return '';
+  }
+}
+
 function extractLastJsonlEventSummary(line) {
   try {
     const obj = JSON.parse(line);
@@ -86,6 +110,9 @@ function extractLastJsonlEventSummary(line) {
     return String(line || '').slice(0, 500);
   }
 }
+
+/** Max length for execution brief so one sendMessage stays reasonable; Discord split is handled by sendDiscordMessage. */
+const EXECUTION_BRIEF_MAX_LENGTH = 100_000;
 
 function buildExecutionBrief({ prompt, taskTitle }) {
   const marker = '[PROMPT]';
@@ -100,7 +127,7 @@ function buildExecutionBrief({ prompt, taskTitle }) {
   if (!text) text = String(taskTitle || '').replace(/\s+/g, ' ').trim();
   if (!text) return null;
 
-  return truncate(text, 220);
+  return truncate(text, EXECUTION_BRIEF_MAX_LENGTH);
 }
 
 async function trySendFailureScreenshot(phone, artifactsDir) {
@@ -131,6 +158,17 @@ class Executor {
     this.schedulerTimer = null;
     this.reportTimer = null;
     this.cleanupTimer = null;
+    // Optional hook called after any run completes (used by longrun-executor.js)
+    this.onRunComplete = null;
+  }
+
+  /**
+   * Registers a callback to be fired after every run completion.
+   * The hook receives: { phone, taskId, runId, runnerKind, status, summary, exitCode }
+   * @param {function} fn
+   */
+  registerRunCompleteHook(fn) {
+    this.onRunComplete = fn;
   }
 
   start() {
@@ -503,6 +541,31 @@ class Executor {
         summary_text: summary || null,
       });
 
+      // Quota fallback: retry immediately with codex-cli without failing the task or notifying LongRun.
+      if (status === 'blocked' && blockedReason === 'quota' && run.runner_kind !== 'codex-cli') {
+        logger.info(
+          { taskId: task.task_id, runId: run.run_id, previousRunner: run.runner_kind },
+          'Quota exceeded, retrying with codex-cli'
+        );
+        const currentTask = taskStore.getTask(task.task_id);
+        if (currentTask) {
+          await sendMessage(
+            phone,
+            `🔄 *Limite de uso atingido* (${task.project_id})\n` +
+            `Task: *${task.task_id}* | Runner anterior: *${run.runner_kind}*\n` +
+            `Reexecutando com *codex-cli*...`
+          );
+          await this.enqueueTaskRun({
+            phone,
+            task: currentTask,
+            prompt: run.prompt,
+            runnerKind: 'codex-cli',
+          });
+        }
+        this.tick().catch((err) => logger.error({ error: err?.message }, 'tick after quota fallback failed'));
+        return;
+      }
+
       if (summary && summary.trim()) {
         // Task-scoped memory: persist the assistant output per run.
         const maxChars = 20000;
@@ -648,6 +711,23 @@ class Executor {
               runnerKind: latestTask.runner_kind || run.runner_kind,
             });
           }
+        }
+      }
+
+      // Fire LongRun post-run hook if registered.
+      if (this.onRunComplete) {
+        try {
+          await this.onRunComplete({
+            phone,
+            taskId: task.task_id,
+            runId: run.run_id,
+            runnerKind: run.runner_kind,
+            status,
+            summary,
+            exitCode,
+          });
+        } catch (err) {
+          logger.warn({ error: err?.message }, 'onRunComplete hook error');
         }
       }
 

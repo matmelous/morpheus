@@ -44,7 +44,7 @@ This guide covers the full Morpheus Discord setup and operation:
 
 ## 4) Configure `.env`
 
-File: `/Users/matheus/development/development/morpheus/.env`
+File: `<morpheus-root>/.env`
 
 ```env
 DISCORD_ENABLED=true

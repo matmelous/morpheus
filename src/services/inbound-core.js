@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { resolve, basename, normalize, isAbsolute, sep, dirname } from 'node:path';
 import { spawn } from 'node:child_process';
+import crypto from 'node:crypto';
 import { config } from '../config/index.js';
 import { logger } from '../utils/logger.js';
 import { truncate } from '../utils/text.js';
@@ -23,6 +24,105 @@ import { extFromMime, safeFileName, buildCanonicalMediaMessage } from './media-u
 import { transcribeAudioFile } from './transcription.js';
 import { describeImage } from './vision.js';
 import { isRunnerKindSupported, listSupportedRunnerKinds } from '../runners/index.js';
+import {
+  ensureLongrunDirs,
+  getLongrunRoot,
+  writePartialSpec,
+  writeFinalSpec,
+} from './longrun.js';
+import {
+  startLongrunExecution,
+  advanceLongrun,
+  onLongrunTaskComplete,
+  onLongrunTaskFailed,
+  onLongrunValidationComplete,
+  resolveRunnerForSession,
+  LONGRUN_RUNNER_PRIORITY,
+} from './longrun-executor.js';
+
+// Register LongRun post-run hook on the executor.
+// This hook fires after every run completes and advances LongRun sessions automatically.
+executor.registerRunCompleteHook(async ({ phone, taskId, status, summary, exitCode }) => {
+  const session = taskStore.getLongrunSessionByTaskId(taskId);
+  if (!session || session.status !== 'running') return;
+
+  // Do not advance if the user has queued messages waiting — let them drain first via normal flow.
+  const queuedItems = taskStore.listExecutionItems(taskId);
+  if (queuedItems.length > 0) return;
+
+  let spec;
+  try {
+    spec = JSON.parse(session.spec_json || 'null');
+  } catch {
+    logger.warn({ sessionId: session.id }, '[LongRun] Failed to parse spec_json in hook');
+    return;
+  }
+  if (!spec) return;
+
+  const task = taskStore.getTask(taskId);
+  if (!task) return;
+
+  const longrunRoot = getLongrunRoot(session.project_cwd, session.feature_uuid);
+  const currentTaskUuid = session.current_task_uuid;
+
+  if (!currentTaskUuid) return;
+
+  // Validation run: current_task_uuid is prefixed with "validation:"
+  if (currentTaskUuid.startsWith('validation:')) {
+    const epicUuid = currentTaskUuid.slice('validation:'.length);
+    let epic = null;
+    outer: for (const wave of (spec.waves || [])) {
+      for (const eg of (wave.epic_groups || [])) {
+        for (const e of (eg.epics || [])) {
+          if (e.uuid === epicUuid) { epic = e; break outer; }
+        }
+      }
+    }
+    if (!epic) {
+      logger.warn({ sessionId: session.id, epicUuid }, '[LongRun] Epic not found in spec for validation');
+      return;
+    }
+    await onLongrunValidationComplete({ phone, task, session, spec, longrunRoot, epic, runSummary: summary });
+    return;
+  }
+
+  // Regular task run.
+  if (status === 'done') {
+    await onLongrunTaskComplete({ phone, task, session, spec, longrunRoot, completedTaskUuid: currentTaskUuid });
+  } else if (status === 'blocked') {
+    // Runner hit token limit — rotate to next runner in priority list.
+    const freshSession = taskStore.getLongrunSession(session.id);
+    let priority = LONGRUN_RUNNER_PRIORITY.slice();
+    if (freshSession?.runner_priority) {
+      try {
+        const parsed = JSON.parse(freshSession.runner_priority);
+        if (Array.isArray(parsed) && parsed.length > 0) priority = parsed;
+      } catch {}
+    }
+    priority.shift(); // Remove the runner that hit the limit.
+    if (priority.length === 0) {
+      taskStore.updateLongrunSession(session.id, { status: 'failed' });
+      await sendMessage(
+        phone,
+        `[LongRun] Todos os runners esgotaram os limites de tokens. LongRun parado.\n` +
+        `Revise os documentos e reinicie manualmente.`
+      );
+      return;
+    }
+    taskStore.updateLongrunSession(session.id, { runner_priority: JSON.stringify(priority) });
+    logger.info({ sessionId: session.id, nextRunner: priority[0] }, '[LongRun] runner rotated after block');
+    await advanceLongrun({ phone, task, session: freshSession, spec, longrunRoot });
+  } else if (status === 'error') {
+    await onLongrunTaskFailed({ phone, session, errorMsg: `exit ${exitCode}`, taskUuid: currentTaskUuid });
+  } else {
+    // cancelled or other — pause the LongRun.
+    taskStore.updateLongrunSession(session.id, { status: 'paused' });
+    await sendMessage(
+      phone,
+      `[LongRun] Pausado (status=${status}).\nTask UUID: ${currentTaskUuid}\nEnvie */longrun-resume* para continuar.`
+    );
+  }
+});
 
 function listRunnerKindsText({ includeAuto = true } = {}) {
   return listSupportedRunnerKinds({ includeAuto }).join('|');
@@ -115,7 +215,7 @@ function repoBasename(url) {
   const s = String(url || '').trim();
   if (!s) return '';
   const noQuery = s.split('?')[0];
-  const last = noQuery.replace(/\/+$/, '').split('/').pop() || '';
+  const last = noQuery.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || '';
   const base = last.endsWith('.git') ? last.slice(0, -4) : last;
   return base || '';
 }
@@ -244,8 +344,11 @@ async function handleCommand(phone, rawText, meta = {}) {
       `/memory - Ver memoria compartilhada\n` +
       `/remember <texto> - Adicionar preferencia/definicao na memoria\n` +
       `/forget-memory - Limpar memoria compartilhada\n\n` +
+      `/longrun-status - Ver status do LongRun ativo\n` +
+      `/longrun-resume - Retomar um LongRun pausado\n\n` +
       `Dica: para escolher uma task explicitamente: \`ab: sua mensagem\`\n` +
-      `Dica 2: voce pode falar em linguagem natural, ex.: "troca pro projeto argo", "usa runner claude nesta task".`
+      `Dica 2: voce pode falar em linguagem natural, ex.: "troca pro projeto argo", "usa runner claude nesta task".\n` +
+      `Dica 3: diga "quero iniciar um longrun" para execucao automatica de features completas.`
     );
     return true;
   }
@@ -275,6 +378,73 @@ async function handleCommand(phone, rawText, meta = {}) {
   if (cmd === '/forget-memory') {
     taskStore.clearUserSharedMemory(phone);
     await sendMessage(phone, '🗑️ Memoria compartilhada limpa.');
+    return true;
+  }
+
+  if (cmd === '/longrun-status') {
+    const session = taskStore.getActiveLongrunSessionForPhone(phone);
+    if (!session) {
+      await sendMessage(phone, 'Nenhum LongRun ativo.');
+      return true;
+    }
+    const { getLongrunRoot: _getLongrunRoot, readTasksList: _readTasksList, readValidationsList: _readValList } = await import('./longrun.js');
+    const lRoot = _getLongrunRoot(session.project_cwd, session.feature_uuid);
+    const tasks = _readTasksList(lRoot);
+    const done = tasks.filter((t) => t.status === 'done').length;
+    const vals = _readValList(lRoot);
+    const validated = vals.filter((v) => v.status === 'validated').length;
+    await sendMessage(
+      phone,
+      `[LongRun Status]\n` +
+      `Feature: ${session.feature_title || '(sem titulo)'}\n` +
+      `Feature UUID: ${session.feature_uuid}\n` +
+      `Status: ${session.status}\n` +
+      `Task atual: ${session.current_task_uuid || '(nenhuma)'}\n` +
+      `Tasks: ${done}/${tasks.length} concluidas\n` +
+      `Epics validados: ${validated}/${vals.length}\n` +
+      `Auto-correct attempts: ${session.auto_correct_attempt}\n` +
+      `Docs: ${lRoot}`
+    );
+    return true;
+  }
+
+  if (cmd === '/longrun-resume') {
+    const session = taskStore.getActiveLongrunSessionForPhone(phone);
+    if (!session) {
+      await sendMessage(phone, '❌ Nenhum LongRun ativo.');
+      return true;
+    }
+    if (session.status !== 'paused') {
+      await sendMessage(phone, `❌ LongRun nao esta pausado (status: ${session.status}). Use */longrun-status*.`);
+      return true;
+    }
+
+    let spec;
+    try {
+      spec = JSON.parse(session.spec_json || 'null');
+    } catch {
+      await sendMessage(phone, '❌ Spec LongRun corrompido. Nao e possivel retomar.');
+      return true;
+    }
+    if (!spec) {
+      await sendMessage(phone, '❌ Spec LongRun vazio. Nao e possivel retomar.');
+      return true;
+    }
+
+    const user = taskStore.getUser(phone);
+    const focusedTaskId = user?.focused_task_id || session.task_id;
+    const task = taskStore.getTask(focusedTaskId) || taskStore.getTask(session.task_id);
+    if (!task) {
+      await sendMessage(phone, '❌ Task associada ao LongRun nao encontrada.');
+      return true;
+    }
+
+    taskStore.updateLongrunSession(session.id, { status: 'running' });
+    const { getLongrunRoot: _lr } = await import('./longrun.js');
+    const longrunRoot = _lr(session.project_cwd, session.feature_uuid);
+
+    await sendMessage(phone, '[LongRun] Retomando...');
+    await advanceLongrun({ phone, task, session, spec, longrunRoot });
     return true;
   }
 
@@ -1269,6 +1439,8 @@ async function routeToTask(phone, taskId, message, messageMeta = {}) {
   else if (userRunner && userRunner !== 'auto') forcedRunnerKind = userRunner;
   else if (taskRunner === 'auto' || userRunner === 'auto') forcedRunnerKind = null;
 
+  const longrunSession = taskStore.getActiveLongrunSessionForPhone(phone);
+
   let orchestration = null;
   try {
     orchestration = await orchestrateTaskMessage({
@@ -1276,6 +1448,7 @@ async function routeToTask(phone, taskId, message, messageMeta = {}) {
       task,
       userMessage: String(message || '').trim(),
       preferredRunnerKind: forcedRunnerKind,
+      longrunSession,
     });
   } catch (err) {
     logger.warn({ error: err?.message }, 'Orchestrator failed, falling back to direct execution');
@@ -1607,6 +1780,164 @@ async function routeToTask(phone, taskId, message, messageMeta = {}) {
     } catch (err) {
       await sendMessage(phone, `❌ Falha no clone: ${truncate(err?.message || 'erro desconhecido', 1200)}`);
     }
+    return;
+  }
+
+  // action=longrun_initiate
+  // First detection: planner has generated a feature UUID and first gathering questions.
+  if (plan.action === 'longrun_initiate') {
+    const featureUuid = String(plan.feature_uuid || '').trim();
+    const reply = String(plan.reply_text || '').trim();
+    if (!featureUuid || !reply) {
+      await sendMessage(phone, '❌ Planner retornou longrun_initiate invalido (faltando feature_uuid ou reply_text).');
+      return;
+    }
+
+    const existingActive = taskStore.getActiveLongrunSessionForPhone(phone);
+    if (existingActive && existingActive.status !== 'failed' && existingActive.status !== 'completed') {
+      await sendMessage(
+        phone,
+        `⚠️ Ja existe um LongRun ativo (feature: *${existingActive.feature_title || existingActive.feature_uuid}*, status: ${existingActive.status}).\n` +
+        `Envie */longrun-status* para ver detalhes ou conclua/cancele o atual primeiro.`
+      );
+      return;
+    }
+
+    const sessionId = crypto.randomUUID();
+    const longrunRoot = getLongrunRoot(task.cwd, featureUuid);
+    ensureLongrunDirs(longrunRoot);
+
+    taskStore.createLongrunSession({
+      id: sessionId,
+      phone,
+      taskId: task.task_id,
+      projectId: task.project_id,
+      projectCwd: task.cwd,
+      featureUuid,
+      featureTitle: null,
+      specJson: null,
+      preferredRunner: null,
+      runnerPriority: LONGRUN_RUNNER_PRIORITY,
+    });
+
+    taskStore.insertTaskMessage(task.task_id, 'assistant', reply);
+    taskStore.updateTask(task.task_id, { status: 'waiting', last_update: 'longrun_initiate' });
+    await sendMessage(phone, reply);
+    return;
+  }
+
+  // action=longrun_gather
+  // Incremental gathering: planner has accumulated more spec data. Write files to disk.
+  if (plan.action === 'longrun_gather') {
+    const specJsonRaw = String(plan.spec_json || '').trim();
+    const reply = String(plan.reply_text || '').trim();
+
+    const activeSession = longrunSession || taskStore.getActiveLongrunSessionForPhone(phone);
+    if (!activeSession) {
+      await sendMessage(phone, '❌ Nenhuma sessao LongRun ativa para longrun_gather.');
+      return;
+    }
+    if (activeSession.status !== 'gathering' && activeSession.status !== 'confirming') {
+      await sendMessage(phone, `❌ Sessao LongRun em estado invalido para gather: ${activeSession.status}`);
+      return;
+    }
+
+    let partialSpec;
+    try {
+      partialSpec = JSON.parse(specJsonRaw);
+    } catch {
+      await sendMessage(phone, '❌ spec_json invalido em longrun_gather.');
+      return;
+    }
+
+    const longrunRoot = getLongrunRoot(activeSession.project_cwd, activeSession.feature_uuid);
+    ensureLongrunDirs(longrunRoot);
+    writePartialSpec(longrunRoot, partialSpec);
+
+    const featureTitle = partialSpec?.feature?.title || activeSession.feature_title || null;
+    taskStore.updateLongrunSession(activeSession.id, {
+      spec_json: specJsonRaw,
+      feature_title: featureTitle,
+      status: 'gathering',
+    });
+
+    taskStore.insertTaskMessage(task.task_id, 'assistant', reply);
+    taskStore.updateTask(task.task_id, { status: 'waiting', last_update: 'longrun_gather' });
+    await sendMessage(phone, reply);
+    return;
+  }
+
+  // action=longrun_confirm
+  // Full spec ready: write final files (including tasks.txt and validations.txt), await user confirmation.
+  if (plan.action === 'longrun_confirm') {
+    const specJsonRaw = String(plan.spec_json || '').trim();
+    const summary = String(plan.reply_text || '').trim();
+
+    const activeSession = longrunSession || taskStore.getActiveLongrunSessionForPhone(phone);
+    if (!activeSession) {
+      await sendMessage(phone, '❌ Nenhuma sessao LongRun ativa para longrun_confirm.');
+      return;
+    }
+
+    let spec;
+    try {
+      spec = JSON.parse(specJsonRaw);
+    } catch {
+      await sendMessage(phone, '❌ spec_json invalido em longrun_confirm.');
+      return;
+    }
+
+    const longrunRoot = getLongrunRoot(activeSession.project_cwd, activeSession.feature_uuid);
+    ensureLongrunDirs(longrunRoot);
+
+    try {
+      writeFinalSpec(longrunRoot, spec);
+    } catch (err) {
+      await sendMessage(phone, `❌ Falha ao escrever arquivos LongRun: ${truncate(err?.message || 'erro desconhecido', 600)}`);
+      return;
+    }
+
+    const featureTitle = spec?.feature?.title || activeSession.feature_title || null;
+    taskStore.updateLongrunSession(activeSession.id, {
+      status: 'confirming',
+      spec_json: specJsonRaw,
+      feature_title: featureTitle,
+    });
+
+    taskStore.insertTaskMessage(task.task_id, 'assistant', summary);
+    taskStore.updateTask(task.task_id, { status: 'waiting', last_update: 'longrun_confirm' });
+    await sendMessage(phone, summary);
+    await sendMessage(
+      phone,
+      `Documentos criados em:\n${longrunRoot}\n\n` +
+      `Responda *confirmo* para iniciar a execucao ou sugira modificacoes.`
+    );
+    return;
+  }
+
+  // action=longrun_execute
+  // User confirmed: start the recursive execution engine.
+  if (plan.action === 'longrun_execute') {
+    const activeSession = longrunSession || taskStore.getActiveLongrunSessionForPhone(phone);
+    if (!activeSession || activeSession.status !== 'confirming') {
+      await sendMessage(phone, '❌ Nenhum LongRun aguardando confirmacao. Use */longrun-status* para verificar.');
+      return;
+    }
+
+    let spec;
+    try {
+      spec = JSON.parse(activeSession.spec_json || 'null');
+    } catch {
+      await sendMessage(phone, '❌ spec_json corrompido na sessao LongRun.');
+      return;
+    }
+    if (!spec) {
+      await sendMessage(phone, '❌ Spec LongRun vazio. Reinicie o processo de coleta.');
+      return;
+    }
+
+    const longrunRoot = getLongrunRoot(activeSession.project_cwd, activeSession.feature_uuid);
+    await startLongrunExecution({ phone, task, session: activeSession, spec, longrunRoot });
     return;
   }
 
