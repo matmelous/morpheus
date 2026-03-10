@@ -44,6 +44,7 @@ const EnvSchema = z.object({
   DISCORD_ALLOWED_GUILD_IDS: z.string().optional().default(''),
   DISCORD_ADMIN_USER_IDS: z.string().optional().default(''),
   DISCORD_MESSAGE_MAX_LENGTH: z.coerce.number().int().positive().default(1900),
+  DISCORD_MEDIA_MAX_BYTES: z.coerce.number().int().positive().default(8 * 1024 * 1024),
 
   ALLOWED_PHONE_NUMBERS: z.string().min(1),
   ADMIN_PHONE_NUMBERS: z.string().optional().default(''),
@@ -132,6 +133,7 @@ export const config = {
     allowedGuildIds: parseCsvList(env.DISCORD_ALLOWED_GUILD_IDS),
     adminUserIds: parseCsvList(env.DISCORD_ADMIN_USER_IDS),
     messageMaxLength: env.DISCORD_MESSAGE_MAX_LENGTH,
+    mediaMaxBytes: env.DISCORD_MEDIA_MAX_BYTES,
   },
 
   allowedPhoneNumbers,

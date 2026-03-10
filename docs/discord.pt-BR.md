@@ -7,6 +7,7 @@ Este guia cobre toda a configuração e operação do Morpheus no Discord:
 - conectar o bot em um ou mais servidores;
 - liberar guilds no `.env`;
 - habilitar canais específicos para task fixa;
+- enviar e receber mídia (imagem/áudio/arquivo);
 - entender `DISCORD_INSTANCE_ID`;
 - validar que o bot está funcionando.
 
@@ -33,6 +34,7 @@ Este guia cobre toda a configuração e operação do Morpheus no Discord:
 3. Em `Bot Permissions`, marque pelo menos:
    - `View Channels`
    - `Send Messages`
+   - `Attach Files`
    - `Read Message History`
 4. Abra a URL gerada e escolha o servidor.
 
@@ -53,12 +55,14 @@ DISCORD_ALLOWED_GUILD_IDS=111111111111111111,222222222222222222
 DISCORD_ADMIN_USER_IDS=999999999999999999
 DISCORD_INSTANCE_ID=morpheus-discord
 DISCORD_MESSAGE_MAX_LENGTH=1900
+DISCORD_MEDIA_MAX_BYTES=8388608
 ```
 
 Notas:
 
 - `DISCORD_ALLOWED_GUILD_IDS`: pode conter vários servidores (CSV).
 - `DISCORD_ADMIN_USER_IDS`: usuários que podem executar comandos admin no Discord.
+- `DISCORD_MEDIA_MAX_BYTES`: tamanho máximo de anexo para upload/download no Discord (default: 8 MB).
 - `DISCORD_INSTANCE_ID`: identificador interno para deduplicação de mensagens.
   - Não vem do Discord.
   - Pode manter `morpheus-discord`.
@@ -114,6 +118,9 @@ Pode usar o mesmo Discord App/Bot em vários servidores:
 - O bot não roda automaticamente em todos os canais.
 - Apenas canais habilitados com `/channel-enable` processam mensagens.
 - Canais não habilitados ficam em silêncio.
+- Envio de mídia no Discord é suportado (imagem/áudio/arquivo), com fallback em texto quando upload falha.
+- Anexos recebidos no Discord são processados junto do texto (exceto comandos com `/`).
+- Se a mensagem começar com `/`, os anexos são ignorados e apenas o comando é executado.
 - WhatsApp continua funcionando em paralelo.
 
 ## 9) Troubleshooting rápido
@@ -129,3 +136,5 @@ Pode usar o mesmo Discord App/Bot em vários servidores:
   - seu user ID não está em `DISCORD_ADMIN_USER_IDS`.
 - Duplicidade de resposta:
   - evite duas instâncias do Morpheus rodando com o mesmo token ao mesmo tempo.
+- Falha de upload/download de anexo:
+  - confira `DISCORD_MEDIA_MAX_BYTES` e permissão do canal para anexar arquivos.

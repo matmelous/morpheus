@@ -61,6 +61,37 @@ class TaskStore {
     this.db.prepare('DELETE FROM user_shared_memory WHERE phone = ?').run(phone);
   }
 
+  getProjectMemory(projectId, phone) {
+    return this.db.prepare('SELECT content, updated_at FROM project_memory WHERE project_id = ? AND phone = ?').get(projectId, phone) || null;
+  }
+
+  setProjectMemory(projectId, phone, content) {
+    this.ensureUser(phone);
+    const c = String(content || '').trim();
+    const now = nowIso();
+    this.db.prepare(`
+      INSERT INTO project_memory (project_id, phone, content, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(project_id, phone) DO UPDATE SET
+        content = excluded.content,
+        updated_at = excluded.updated_at
+    `).run(projectId, phone, c, now, now);
+  }
+
+  appendProjectMemory(projectId, phone, text) {
+    const t = String(text || '').trim();
+    if (!t) return;
+    const prev = this.getProjectMemory(projectId, phone)?.content || '';
+    const next = prev
+      ? `${prev}\n\n- ${t}`
+      : `- ${t}`;
+    this.setProjectMemory(projectId, phone, next);
+  }
+
+  clearProjectMemory(projectId, phone) {
+    this.db.prepare('DELETE FROM project_memory WHERE project_id = ? AND phone = ?').run(projectId, phone);
+  }
+
   setUserDefaultProject(phone, projectId) {
     this.ensureUser(phone);
     this.db.prepare('UPDATE users SET default_project_id = ?, updated_at = ? WHERE phone = ?')
@@ -648,6 +679,99 @@ class TaskStore {
     const sets = [...keys.map((k) => `${k} = ?`), 'updated_at = ?'].join(', ');
     const values = [...keys.map((k) => updates[k]), nowIso(), id];
     this.db.prepare(`UPDATE longrun_sessions SET ${sets} WHERE id = ?`).run(...values);
+  }
+
+  // --- Chat History CRUD ---
+
+  /**
+   * Inserts a new message into the global chat history.
+   * @param {object} params
+   * @param {string} params.phone - User phone number
+   * @param {string} params.taskId - Task ID this message belongs to
+   * @param {string} params.projectId - Project ID
+   * @param {string} params.role - Message role ('user' or 'assistant')
+   * @param {string} params.content - Message content
+   * @param {string} [params.actionSummary] - Optional summary of actions executed
+   * @returns {number} The ID of the inserted row
+   */
+  insertChatHistory({ phone, taskId, projectId, role, content, actionSummary = null }) {
+    this.ensureUser(phone);
+    const info = this.db.prepare(`
+      INSERT INTO chat_history (phone, task_id, project_id, role, content, action_summary, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      phone,
+      taskId,
+      projectId,
+      role,
+      String(content || '').trim(),
+      actionSummary ? String(actionSummary).trim() : null,
+      nowIso()
+    );
+    return info.lastInsertRowid;
+  }
+
+  /**
+   * Returns recent chat history for a user, optionally filtered by project.
+   * @param {string} phone - User phone number
+   * @param {object} options - Query options
+   * @param {number} [options.limit=20] - Maximum number of messages to return
+   * @param {string} [options.projectId=null] - Optional project filter
+   * @returns {Array<object>} Array of chat history rows, ordered newest first
+   */
+  listChatHistory(phone, { limit = 20, projectId = null } = {}) {
+    if (projectId) {
+      return this.db.prepare(`
+        SELECT id, phone, task_id, project_id, role, content, action_summary, created_at
+        FROM chat_history
+        WHERE phone = ? AND project_id = ?
+        ORDER BY created_at DESC
+        LIMIT ?
+      `).all(phone, projectId, limit);
+    }
+    return this.db.prepare(`
+      SELECT id, phone, task_id, project_id, role, content, action_summary, created_at
+      FROM chat_history
+      WHERE phone = ?
+      ORDER BY created_at DESC
+      LIMIT ?
+    `).all(phone, limit);
+  }
+
+  /**
+   * Deletes old chat history entries for a user, keeping only the most recent N messages.
+   * @param {string} phone - User phone number
+   * @param {number} keep - Number of recent messages to keep
+   * @returns {number} Number of deleted rows
+   */
+  pruneOldChatHistory(phone, keep = 100) {
+    if (!phone || keep < 1) return 0;
+    const doomed = this.db.prepare(`
+      SELECT id
+      FROM chat_history
+      WHERE phone = ?
+      ORDER BY created_at DESC
+      LIMIT -1 OFFSET ?
+    `).all(phone, keep);
+    if (!doomed.length) return 0;
+
+    const delStmt = this.db.prepare('DELETE FROM chat_history WHERE id = ?');
+    const tx = this.db.transaction((rows) => {
+      for (const row of rows) {
+        delStmt.run(row.id);
+      }
+    });
+    tx(doomed);
+    return doomed.length;
+  }
+
+  /**
+   * Clears all chat history for a user.
+   * @param {string} phone - User phone number
+   * @returns {number} Number of deleted rows
+   */
+  clearChatHistory(phone) {
+    return this.db.prepare('DELETE FROM chat_history WHERE phone = ?').run(phone).changes;
   }
 }
 

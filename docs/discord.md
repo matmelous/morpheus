@@ -7,6 +7,7 @@ This guide covers the full Morpheus Discord setup and operation:
 - connecting the bot to one or more servers;
 - allowing guilds in `.env`;
 - enabling specific channels for fixed-task mode;
+- sending and receiving media (image/audio/file);
 - understanding `DISCORD_INSTANCE_ID`;
 - validating that the bot is working.
 
@@ -33,6 +34,7 @@ This guide covers the full Morpheus Discord setup and operation:
 3. Under `Bot Permissions`, grant at least:
    - `View Channels`
    - `Send Messages`
+   - `Attach Files`
    - `Read Message History`
 4. Open the generated URL and choose the server.
 
@@ -53,12 +55,14 @@ DISCORD_ALLOWED_GUILD_IDS=111111111111111111,222222222222222222
 DISCORD_ADMIN_USER_IDS=999999999999999999
 DISCORD_INSTANCE_ID=morpheus-discord
 DISCORD_MESSAGE_MAX_LENGTH=1900
+DISCORD_MEDIA_MAX_BYTES=8388608
 ```
 
 Notes:
 
 - `DISCORD_ALLOWED_GUILD_IDS`: supports multiple servers (CSV).
 - `DISCORD_ADMIN_USER_IDS`: users allowed to run admin commands in Discord.
+- `DISCORD_MEDIA_MAX_BYTES`: max attachment size for Discord upload/download (default: 8 MB).
 - `DISCORD_INSTANCE_ID`: internal message deduplication identifier.
   - It is not provided by Discord.
   - You can keep `morpheus-discord`.
@@ -114,6 +118,9 @@ You can use the same Discord app/bot in multiple servers:
 - The bot does not run automatically in all channels.
 - Only channels enabled with `/channel-enable` are processed.
 - Non-enabled channels stay silent.
+- Outbound media is supported on Discord (image/audio/file) with text fallback on upload errors.
+- Inbound Discord attachments are processed together with text (except slash commands).
+- If a message starts with `/`, attachments are ignored and only the command is executed.
 - WhatsApp keeps working in parallel.
 
 ## 9) Quick troubleshooting
@@ -129,3 +136,5 @@ You can use the same Discord app/bot in multiple servers:
   - your user ID is not in `DISCORD_ADMIN_USER_IDS`.
 - Duplicate replies:
   - avoid running multiple Morpheus instances with the same bot token at once.
+- Attachment upload/download failing:
+  - check `DISCORD_MEDIA_MAX_BYTES` and Discord channel permission to attach files.

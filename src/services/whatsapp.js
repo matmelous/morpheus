@@ -97,6 +97,15 @@ function isGroupJid(jid) {
   return String(jid || '').endsWith('@g.us');
 }
 
+function getDocumentMessageContent(messageContent) {
+  if (!messageContent) return null;
+  if (messageContent.documentMessage) return messageContent.documentMessage;
+  const wrapped = messageContent.documentWithCaptionMessage;
+  if (wrapped?.message?.documentMessage) return wrapped.message.documentMessage;
+  if (wrapped?.documentMessage) return wrapped.documentMessage;
+  return null;
+}
+
 function normalizeInboundMessage(message) {
   if (!message?.key) return null;
 
@@ -180,6 +189,26 @@ function normalizeInboundMessage(message) {
     };
   }
 
+  const documentMessage = getDocumentMessageContent(content);
+  if (documentMessage) {
+    return {
+      event: 'message.received',
+      instanceId: config.whatsappInstanceId,
+      data: {
+        type: 'file',
+        isGroup: isGroupJid(remoteJid),
+        fromMe,
+        from,
+        messageId,
+        content: { caption: documentMessage.caption || '' },
+        media: {
+          type: 'file',
+          message,
+        },
+      },
+    };
+  }
+
   return null;
 }
 
@@ -197,6 +226,14 @@ function getMediaMeta(messageContent, type) {
     return {
       mimetype: messageContent.audioMessage?.mimetype || 'audio/ogg',
       fileName: null,
+    };
+  }
+
+  if (type === 'file') {
+    const documentMessage = getDocumentMessageContent(messageContent);
+    return {
+      mimetype: documentMessage?.mimetype || 'application/octet-stream',
+      fileName: documentMessage?.fileName || documentMessage?.title || null,
     };
   }
 

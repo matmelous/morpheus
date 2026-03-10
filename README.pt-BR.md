@@ -149,6 +149,8 @@ Resumo:
 - Um bot pode atender vários servidores (`DISCORD_ALLOWED_GUILD_IDS`);
 - cada canal precisa ser habilitado com `/channel-enable`;
 - cada canal habilitado opera com task fixa própria;
+- envio/recebimento de mídia no Discord suporta imagem, áudio e arquivo genérico;
+- comandos com barra (`/...`) ignoram anexos para evitar efeito colateral;
 - canais não habilitados ficam em silêncio.
 
 ## Projetos
@@ -171,28 +173,32 @@ Comandos úteis:
 - `/project-clone <id> <gitUrl> [--dir d] [--depth 1] [--type t] [--name ...]` (admin);
 - `/project-rm <id>` (admin).
 
-## Mídia recebida (áudio/imagem)
+## Mídia recebida (WhatsApp + Discord)
 
 Fluxo:
 
-1. Baixa a mídia recebida.
+1. Baixa a mídia/anexo recebido.
 2. Salva em `RUNS_DIR/<taskId>/inbox/<messageId>/`.
 3. Áudio: transcreve via OpenAI Whisper (`OPENAI_API_KEY`).
 4. Imagem: descreve via provider multimodal (`OPENROUTER_API_KEY`).
-5. Converte para texto canônico e envia ao orquestrador.
+5. Arquivo genérico: mantém como artefato salvo e gera contexto canônico.
+6. Converte para texto canônico e envia ao orquestrador.
 
 Documentação de mídia:
 
 - English: `docs/whatsapp-media.md`;
 - Português: `docs/whatsapp-media.pt-BR.md`.
 
-## Memória compartilhada
+## Memória compartilhada e por projeto
 
 Comandos:
 
 - `/memory`;
 - `/remember <texto>`;
-- `/forget-memory`.
+- `/forget-memory`;
+- `/project-memory [projectId]`;
+- `/remember-project <texto>`;
+- `/forget-project-memory [projectId]`.
 
 ## Open source e contribuição
 
