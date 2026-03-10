@@ -149,6 +149,8 @@ Summary:
 - One bot can serve multiple guilds (`DISCORD_ALLOWED_GUILD_IDS`);
 - each channel must be enabled with `/channel-enable`;
 - each enabled channel uses its own fixed task context;
+- Discord media send/receive is supported for image, audio, and generic files;
+- slash commands (`/...`) ignore attachments for safer command handling;
 - non-enabled channels stay silent.
 
 ## Projects
@@ -171,28 +173,32 @@ Useful commands:
 - `/project-clone <id> <gitUrl> [--dir d] [--depth 1] [--type t] [--name ...]` (admin);
 - `/project-rm <id>` (admin).
 
-## Incoming media (audio/image)
+## Incoming media (WhatsApp + Discord)
 
 Flow:
 
-1. Download incoming media.
+1. Download incoming media/attachments.
 2. Save in `RUNS_DIR/<taskId>/inbox/<messageId>/`.
 3. Audio: transcribe with OpenAI Whisper (`OPENAI_API_KEY`).
 4. Image: describe with multimodal provider (`OPENROUTER_API_KEY`).
-5. Convert to canonical text and pass to the orchestrator.
+5. Generic files: keep as saved artifacts and generate canonical context text.
+6. Convert to canonical text and pass to the orchestrator.
 
 Media docs:
 
 - English: `docs/whatsapp-media.md`;
 - Portuguese: `docs/whatsapp-media.pt-BR.md`.
 
-## Shared memory
+## Shared and project memory
 
 Commands:
 
 - `/memory`;
 - `/remember <text>`;
-- `/forget-memory`.
+- `/forget-memory`;
+- `/project-memory [projectId]`;
+- `/remember-project <text>`;
+- `/forget-project-memory [projectId]`.
 
 ## Open source and contributions
 

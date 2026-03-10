@@ -9,7 +9,7 @@ All message and file exchange runs internally through Baileys (`@whiskeysockets/
 ## How it works
 
 - Send text/image: `src/services/whatsapp.js` (`sendMessage`, `sendImage`)
-- Receive audio/image: Baileys `messages.upsert` listener
+- Receive audio/image/document: Baileys `messages.upsert` listener
 - Download incoming media: Baileys `downloadMediaMessage`
 
 ## Incoming media flow
@@ -18,7 +18,8 @@ All message and file exchange runs internally through Baileys (`@whiskeysockets/
 2. Internal payload is routed to `src/services/inbound-core.js`.
 3. Media is downloaded and saved to `RUNS_DIR/<taskId>/inbox/<messageId>/`.
 4. Audio is transcribed (OpenAI Whisper) and image is described (OpenRouter multimodal).
-5. Result is converted to canonical text for orchestrator input.
+5. Documents/files are saved as artifacts and converted to canonical context text.
+6. Result is converted to canonical text for orchestrator input.
 
 ## Note
 

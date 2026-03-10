@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'fs';
-import { resolve } from 'path';
+import { basename, resolve } from 'path';
 import { config } from '../config/index.js';
 import { logger } from '../utils/logger.js';
 import { formatElapsed } from '../utils/time.js';
@@ -8,7 +8,9 @@ import { makeId } from '../utils/ids.js';
 import { spawnStreamingProcess } from '../utils/spawn.js';
 import { getRunner } from '../runners/index.js';
 import { taskStore } from './task-store.js';
-import { sendImage, sendMessage } from './messenger.js';
+import { sendAudio, sendFile, sendImage, sendMessage } from './messenger.js';
+import { safeFileName } from './media-utils.js';
+import { buildPromptWithMemories } from './memory-context.js';
 import {
   estimateUsage,
   formatTokenSummaryLine,
@@ -65,8 +67,52 @@ function safeReadJsonFile(path) {
   }
 }
 
-function isLikelyPng(path) {
-  return String(path || '').toLowerCase().endsWith('.png');
+function inferMimeFromPath(path) {
+  const p = String(path || '').toLowerCase();
+  if (p.endsWith('.png')) return 'image/png';
+  if (p.endsWith('.jpg') || p.endsWith('.jpeg')) return 'image/jpeg';
+  if (p.endsWith('.webp')) return 'image/webp';
+  if (p.endsWith('.gif')) return 'image/gif';
+  if (p.endsWith('.mp3')) return 'audio/mpeg';
+  if (p.endsWith('.m4a')) return 'audio/mp4';
+  if (p.endsWith('.ogg') || p.endsWith('.oga')) return 'audio/ogg';
+  if (p.endsWith('.wav')) return 'audio/wav';
+  if (p.endsWith('.pdf')) return 'application/pdf';
+  if (p.endsWith('.json')) return 'application/json';
+  if (p.endsWith('.txt')) return 'text/plain';
+  if (p.endsWith('.csv')) return 'text/csv';
+  if (p.endsWith('.zip')) return 'application/zip';
+  return 'application/octet-stream';
+}
+
+function inferEvidenceKind(path, mimetype) {
+  const mime = String(mimetype || inferMimeFromPath(path)).toLowerCase();
+  if (mime.startsWith('image/')) return 'image';
+  if (mime.startsWith('audio/')) return 'audio';
+  return 'file';
+}
+
+async function sendEvidenceItem(phone, item) {
+  const path = item?.path;
+  if (!path || !existsSync(path)) return false;
+
+  const mime = String(item?.mimetype || inferMimeFromPath(path)).toLowerCase();
+  const kind = inferEvidenceKind(path, mime);
+  const base64 = readFileSync(path).toString('base64');
+  const caption = item?.caption ? String(item.caption).slice(0, 500) : 'Evidencia';
+  const fileName = safeFileName(item?.fileName || basename(path), `evidence-${Date.now()}`);
+
+  if (kind === 'image') {
+    await sendImage(phone, { base64, caption, fileName, mimetype: mime });
+    return true;
+  }
+  if (kind === 'audio') {
+    await sendAudio(phone, { base64, caption, fileName, mimetype: mime });
+    return true;
+  }
+
+  await sendFile(phone, { base64, caption, fileName, mimetype: mime });
+  return true;
 }
 
 function readLastNonEmptyLine(path, maxBytes = 32_768) {
@@ -540,6 +586,18 @@ class Executor {
         exit_code: exitCode,
         summary_text: summary || null,
       });
+      const appendAssistantHistory = (content, actionSummary = null) => {
+        try {
+          taskStore.insertChatHistory({
+            phone,
+            taskId: task.task_id,
+            projectId: task.project_id,
+            role: 'assistant',
+            content,
+            actionSummary,
+          });
+        } catch {}
+      };
 
       // Quota fallback: retry immediately with codex-cli without failing the task or notifying LongRun.
       if (status === 'blocked' && blockedReason === 'quota' && run.runner_kind !== 'codex-cli') {
@@ -549,12 +607,15 @@ class Executor {
         );
         const currentTask = taskStore.getTask(task.task_id);
         if (currentTask) {
-          await sendMessage(
-            phone,
+          const quotaMsg =
             `🔄 *Limite de uso atingido* (${task.project_id})\n` +
             `Task: *${task.task_id}* | Runner anterior: *${run.runner_kind}*\n` +
-            `Reexecutando com *codex-cli*...`
+            `Reexecutando com *codex-cli*...`;
+          appendAssistantHistory(
+            quotaMsg,
+            JSON.stringify({ source: 'executor', status, blockedReason, runner_kind: run.runner_kind, retry_runner: 'codex-cli' })
           );
+          await sendMessage(phone, quotaMsg);
           await this.enqueueTaskRun({
             phone,
             task: currentTask,
@@ -588,7 +649,12 @@ class Executor {
       });
 
       if (status === 'cancelled') {
-        await sendMessage(phone, `🛑 *Cancelado* (${task.project_id})\nTask: *${task.task_id}*`);
+        const cancelledMsg = `🛑 *Cancelado* (${task.project_id})\nTask: *${task.task_id}*`;
+        appendAssistantHistory(
+          cancelledMsg,
+          JSON.stringify({ source: 'executor', status, blockedReason, runner_kind: run.runner_kind, exit_code: exitCode })
+        );
+        await sendMessage(phone, cancelledMsg);
       } else if (status === 'blocked') {
         if (blockedReason === 'purchase_confirmation') {
           const result = safeReadJsonFile(resultJsonPath);
@@ -611,59 +677,60 @@ class Executor {
             expiresAtIso,
           });
 
-          await sendMessage(
-            phone,
+          const blockedPurchaseMsg =
             `⛔ *Confirmacao necessaria (compra)* (${task.project_id})\n` +
             `Task: *${task.task_id}*\n` +
             `${formatTokenSummaryLine('Tokens run', runTokenTotals)}\n` +
             `Tokens task acumulado: ${Number(taskTokenTotals?.totalTokens || 0)}\n` +
-            `Responda com *CONFIRMO COMPRA* ou envie */confirm* em ate 10 min para continuar.`
+            `Responda com *CONFIRMO COMPRA* ou envie */confirm* em ate 10 min para continuar.`;
+          appendAssistantHistory(
+            blockedPurchaseMsg,
+            JSON.stringify({ source: 'executor', status, blockedReason, runner_kind: run.runner_kind, exit_code: exitCode })
           );
+          await sendMessage(phone, blockedPurchaseMsg);
 
           for (const it of pick) {
-            const path = it?.path;
-            if (!path || !existsSync(path) || !isLikelyPng(path)) continue;
             try {
-              const base64 = readFileSync(path).toString('base64');
-              const caption = it?.caption ? String(it.caption).slice(0, 500) : 'Evidencia';
-              await sendImage(phone, { base64, caption });
+              await sendEvidenceItem(phone, it);
             } catch {}
           }
         } else {
-          await sendMessage(
-            phone,
+          const blockedMsg =
             `⛔ *Bloqueado* (${task.project_id})\n` +
             `Task: *${task.task_id}*\n` +
             `Runner: *${run.runner_kind}*\n` +
             `${state.model ? `Model: *${state.model}*\n` : ''}` +
             `${formatTokenSummaryLine('Tokens run', runTokenTotals)}\n` +
             `Tokens task acumulado: ${Number(taskTokenTotals?.totalTokens || 0)}\n` +
-            `Motivo: *${blockedReason || 'unknown'}*`
+            `Motivo: *${blockedReason || 'unknown'}*`;
+          appendAssistantHistory(
+            blockedMsg,
+            JSON.stringify({ source: 'executor', status, blockedReason, runner_kind: run.runner_kind, exit_code: exitCode })
           );
+          await sendMessage(phone, blockedMsg);
         }
       } else if (status === 'done') {
-        await sendMessage(
-          phone,
+        const doneMsg =
           `✅ *Concluido* (${task.project_id})\n` +
           `Task: *${task.task_id}*\n` +
           `Runner: *${run.runner_kind}*\n\n` +
           `${state.model ? `Model: *${state.model}*\n\n` : ''}` +
           `${formatTokenSummaryLine('Tokens run', runTokenTotals)}\n` +
           `Tokens task acumulado: ${Number(taskTokenTotals?.totalTokens || 0)}\n\n` +
-          `${truncate(summary || '(sem resumo)', 3500)}`
+          `${truncate(summary || '(sem resumo)', 3500)}`;
+        appendAssistantHistory(
+          doneMsg,
+          JSON.stringify({ source: 'executor', status, blockedReason, runner_kind: run.runner_kind, exit_code: exitCode })
         );
+        await sendMessage(phone, doneMsg);
 
         // Send evidence images if present.
         const result = safeReadJsonFile(resultJsonPath);
         const ev = Array.isArray(result?.evidence) ? result.evidence : [];
         const pick = ev.slice(-3);
         for (const it of pick) {
-          const path = it?.path;
-          if (!path || !existsSync(path) || !isLikelyPng(path)) continue;
           try {
-            const base64 = readFileSync(path).toString('base64');
-            const caption = it?.caption ? String(it.caption).slice(0, 500) : 'Evidencia';
-            await sendImage(phone, { base64, caption });
+            await sendEvidenceItem(phone, it);
           } catch {}
         }
       } else {
@@ -672,8 +739,7 @@ class Executor {
         const lastStderr = readLastNonEmptyLine(stderrPath);
         const lastLog = lastStdout ? extractLastJsonlEventSummary(lastStdout) : (lastStderr ? `stderr: ${lastStderr}` : '');
 
-        await sendMessage(
-          phone,
+        const errorMsg =
           `❌ *Erro* (${task.project_id})\n` +
           `Task: *${task.task_id}*\n` +
           `Runner: *${run.runner_kind}*\n` +
@@ -682,8 +748,12 @@ class Executor {
           `Tokens task acumulado: ${Number(taskTokenTotals?.totalTokens || 0)}\n` +
           `Exit: *${exitCode}*\n` +
           `${lastLog ? `Ultimo log: ${truncate(lastLog, 800)}\n` : ''}` +
-          `Artefatos: ${run.artifacts_dir}`
+          `Artefatos: ${run.artifacts_dir}`;
+        appendAssistantHistory(
+          errorMsg,
+          JSON.stringify({ source: 'executor', status, blockedReason, runner_kind: run.runner_kind, exit_code: exitCode })
         );
+        await sendMessage(phone, errorMsg);
 
         await trySendFailureScreenshot(phone, run.artifacts_dir);
       }
@@ -694,11 +764,15 @@ class Executor {
         if (nextQueued?.content) {
           const latestTask = taskStore.getTask(task.task_id);
           if (latestTask && latestTask.phone === phone) {
-            const mem = taskStore.getUserSharedMemory(phone)?.content || '';
             const queuedPrompt = String(nextQueued.content).trim();
-            const prompt = mem && mem.trim()
-              ? `[MEMORIA COMPARTILHADA]\n${mem.trim()}\n\n[PROMPT]\n${queuedPrompt}`
-              : queuedPrompt;
+            const sharedMemory = taskStore.getUserSharedMemory(phone)?.content || '';
+            const projectMemory = taskStore.getProjectMemory(latestTask.project_id, phone)?.content || '';
+            const prompt = buildPromptWithMemories({
+              prompt: queuedPrompt,
+              sharedMemory,
+              projectMemory,
+              projectId: latestTask.project_id,
+            });
 
             await sendMessage(
               phone,

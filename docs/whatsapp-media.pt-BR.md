@@ -9,7 +9,7 @@ Toda a troca de mensagens e arquivos roda internamente via Baileys (`@whiskeysoc
 ## Como funciona
 
 - Envio de texto/imagem: `src/services/whatsapp.js` (`sendMessage`, `sendImage`)
-- Recebimento de áudio/imagem: listener `messages.upsert` do Baileys
+- Recebimento de áudio/imagem/documento: listener `messages.upsert` do Baileys
 - Download da mídia recebida: `downloadMediaMessage` (Baileys)
 
 ## Fluxo de mídia recebida
@@ -18,7 +18,8 @@ Toda a troca de mensagens e arquivos roda internamente via Baileys (`@whiskeysoc
 2. O payload interno é roteado para `src/services/inbound-core.js`.
 3. A mídia é baixada e salva em `RUNS_DIR/<taskId>/inbox/<messageId>/`.
 4. Áudio é transcrito (OpenAI Whisper) e imagem é descrita (OpenRouter multimodal).
-5. O resultado vira texto canônico para o orquestrador.
+5. Documentos/arquivos são salvos como artefatos e convertidos em contexto canônico.
+6. O resultado vira texto canônico para o orquestrador.
 
 ## Observação
 

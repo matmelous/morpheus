@@ -9,6 +9,7 @@ import { isRunnerKindSupported, listRunnerCatalog, listSupportedRunnerKinds } fr
 import { taskStore } from './task-store.js';
 import { getOrchestratorProviderDefault, getRunnerDefault } from './settings.js';
 import { projectManager } from './project-manager.js';
+import { buildMemorySections } from './memory-context.js';
 import {
   compactPlannerPayload,
   estimateTokensFromText,
@@ -74,6 +75,7 @@ function shouldReplyAsGreeting(text) {
 function buildPlannerPromptPayload({
   userMessage,
   contextMessages,
+  globalChatHistory,
   taskId,
   projectId,
   forcedRunnerKind,
@@ -87,6 +89,7 @@ function buildPlannerPromptPayload({
   const { system, user } = buildPlannerMessages({
     userMessage,
     contextMessages,
+    globalChatHistory,
     taskId,
     projectId,
     forcedRunnerKind,
@@ -114,6 +117,23 @@ export async function orchestrateTaskMessage({
 }) {
   const user = taskStore.getUser(phone);
   const originalSharedMemory = taskStore.getUserSharedMemory(phone)?.content || '';
+  const originalProjectMemory = taskStore.getProjectMemory(task.project_id, phone)?.content || '';
+  const originalMemoryContext = buildMemorySections({
+    sharedMemory: originalSharedMemory,
+    projectMemory: originalProjectMemory,
+    projectId: task.project_id,
+  });
+  const globalHistoryLimit = 10;
+  const incomingMessage = String(userMessage || '').trim();
+  const rawGlobalChatHistory = taskStore.listChatHistory(phone, { limit: globalHistoryLimit });
+  const filteredGlobalChatHistory = rawGlobalChatHistory.filter((row, idx) => {
+    if (idx !== 0) return true;
+    return !(
+      String(row?.role || '') === 'user'
+      && String(row?.task_id || '') === String(task.task_id)
+      && String(row?.content || '').trim() === incomingMessage
+    );
+  });
   const providerPref = normalizeProvider(user?.orchestrator_provider_override)
     || normalizeProvider(getOrchestratorProviderDefault())
     || normalizeProvider(config.orchestratorProvider)
@@ -160,11 +180,12 @@ export async function orchestrateTaskMessage({
   const runnerKinds = listSupportedRunnerKinds({ includeAuto: true });
   const runnerCatalog = listRunnerCatalog({ includeAuto: true });
   let effectiveContextMessages = rawContextMessages;
-  let effectiveSharedMemory = originalSharedMemory;
+  let effectiveSharedMemory = originalMemoryContext;
 
   let promptPayload = buildPlannerPromptPayload({
     userMessage,
     contextMessages: effectiveContextMessages,
+    globalChatHistory: filteredGlobalChatHistory,
     taskId: task.task_id,
     projectId: task.project_id,
     forcedRunnerKind,
@@ -181,7 +202,7 @@ export async function orchestrateTaskMessage({
   if (promptPayload.estimatedInputTokens > budgetBefore) {
     const compacted = compactPlannerPayload({
       contextMessages: rawContextMessages,
-      sharedMemory: originalSharedMemory,
+      sharedMemory: originalMemoryContext,
       plannerMaxContextMessages: config.plannerMaxContextMessages,
       tokenBudgetPlannerPerCall: budgetBefore,
       tokenBudgetSharedMemoryMax: config.token.budgetSharedMemoryMax,
@@ -194,6 +215,7 @@ export async function orchestrateTaskMessage({
     promptPayload = buildPlannerPromptPayload({
       userMessage,
       contextMessages: effectiveContextMessages,
+      globalChatHistory: filteredGlobalChatHistory,
       taskId: task.task_id,
       projectId: task.project_id,
       forcedRunnerKind,

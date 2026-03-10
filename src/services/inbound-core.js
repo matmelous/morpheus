@@ -7,6 +7,7 @@ import { logger } from '../utils/logger.js';
 import { truncate } from '../utils/text.js';
 import { projectManager } from './project-manager.js';
 import { downloadMedia } from './whatsapp.js';
+import { downloadDiscordAttachment } from './discord.js';
 import { sendMessage } from './messenger.js';
 import { taskStore } from './task-store.js';
 import {
@@ -39,6 +40,7 @@ import {
   resolveRunnerForSession,
   LONGRUN_RUNNER_PRIORITY,
 } from './longrun-executor.js';
+import { buildPromptWithMemories } from './memory-context.js';
 
 // Register LongRun post-run hook on the executor.
 // This hook fires after every run completes and advances LongRun sessions automatically.
@@ -312,6 +314,52 @@ async function resumePendingConfirmation(phone, rawTextForAudit) {
   return { ok: true, taskId: task.task_id };
 }
 
+function resolveProjectForMemory(phone, explicitProjectId = null) {
+  const requested = String(explicitProjectId || '').trim();
+  if (requested) {
+    const project = projectManager.getProject(requested);
+    if (project) return project;
+    return null;
+  }
+
+  const user = taskStore.getUser(phone);
+  if (user?.focused_task_id) {
+    const focused = taskStore.getTask(user.focused_task_id);
+    if (focused && focused.phone === phone) {
+      const p = projectManager.getProject(focused.project_id);
+      if (p) return p;
+    }
+  }
+
+  return resolveProjectForUser(phone);
+}
+
+function insertChatHistorySafe({ phone, taskId, projectId, role, content, actionSummary = null }) {
+  try {
+    taskStore.insertChatHistory({
+      phone,
+      taskId,
+      projectId,
+      role,
+      content,
+      actionSummary,
+    });
+  } catch {}
+}
+
+function summarizePlanAction(plan) {
+  if (!plan || typeof plan !== 'object') return null;
+  const summary = {
+    action: plan.action || null,
+    runner_kind: plan.runner_kind || null,
+    scope: plan.scope || null,
+    provider: plan.provider || null,
+    project_id: plan.project_id || null,
+    memory_scope: plan.memory_scope || null,
+  };
+  return JSON.stringify(summary);
+}
+
 async function handleCommand(phone, rawText, meta = {}) {
   const parts = rawText.trim().split(/\s+/);
   const cmd = parts[0].toLowerCase();
@@ -344,6 +392,9 @@ async function handleCommand(phone, rawText, meta = {}) {
       `/memory - Ver memoria compartilhada\n` +
       `/remember <texto> - Adicionar preferencia/definicao na memoria\n` +
       `/forget-memory - Limpar memoria compartilhada\n\n` +
+      `/project-memory [projectId] - Ver memoria do projeto atual/ou informado\n` +
+      `/remember-project <texto> - Adicionar anotacao na memoria do projeto atual\n` +
+      `/forget-project-memory [projectId] - Limpar memoria do projeto atual/ou informado\n\n` +
       `/longrun-status - Ver status do LongRun ativo\n` +
       `/longrun-resume - Retomar um LongRun pausado\n\n` +
       `Dica: para escolher uma task explicitamente: \`ab: sua mensagem\`\n` +
@@ -378,6 +429,51 @@ async function handleCommand(phone, rawText, meta = {}) {
   if (cmd === '/forget-memory') {
     taskStore.clearUserSharedMemory(phone);
     await sendMessage(phone, '🗑️ Memoria compartilhada limpa.');
+    return true;
+  }
+
+  if (cmd === '/project-memory') {
+    const projectIdArg = String(parts[1] || '').trim();
+    const project = resolveProjectForMemory(phone, projectIdArg || null);
+    if (!project) {
+      await sendMessage(phone, `❌ Projeto nao encontrado: "${projectIdArg}". Use /projects.`);
+      return true;
+    }
+    const mem = taskStore.getProjectMemory(project.id, phone);
+    const content = String(mem?.content || '').trim();
+    await sendMessage(
+      phone,
+      `🧠 *Memoria do projeto (${project.id})*\n` +
+      `${content ? `\n${content}` : '\n(vazia)'}`
+    );
+    return true;
+  }
+
+  if (cmd === '/remember-project') {
+    const text = rawText.replace(/^\/remember-project\b/i, '').trim();
+    if (!text) {
+      await sendMessage(phone, '❌ Use: /remember-project <texto>');
+      return true;
+    }
+    const project = resolveProjectForMemory(phone);
+    if (!project) {
+      await sendMessage(phone, '❌ Nao foi possivel resolver o projeto atual. Use /project <id>.');
+      return true;
+    }
+    taskStore.appendProjectMemory(project.id, phone, text);
+    await sendMessage(phone, `✅ Salvo na memoria do projeto *${project.id}*.`);
+    return true;
+  }
+
+  if (cmd === '/forget-project-memory') {
+    const projectIdArg = String(parts[1] || '').trim();
+    const project = resolveProjectForMemory(phone, projectIdArg || null);
+    if (!project) {
+      await sendMessage(phone, `❌ Projeto nao encontrado: "${projectIdArg}". Use /projects.`);
+      return true;
+    }
+    taskStore.clearProjectMemory(project.id, phone);
+    await sendMessage(phone, `🗑️ Memoria do projeto *${project.id}* limpa.`);
     return true;
   }
 
@@ -1206,32 +1302,44 @@ function resolveTaskForInboundMedia(phone) {
   return task;
 }
 
-async function handleInboundMedia({ phone, instanceId, data }) {
-  const media = data?.media;
-  const mediaType = media?.type || data?.type || null;
-  const msgObj = media?.message || null;
-  if (!instanceId) throw new Error('missing instanceId');
-  if (!mediaType || !msgObj) throw new Error('missing media payload');
+function normalizeInboundMediaType(value) {
+  const t = String(value || '').trim().toLowerCase();
+  if (t === 'image') return 'image';
+  if (t === 'audio' || t === 'voice') return 'audio';
+  return 'file';
+}
 
-  const messageId = data.messageId || data.message_id || null;
-  const caption = data?.content?.caption || data?.content?.text || '';
+function buildStoredFileName(fileName, mimetype) {
+  const safeName = safeFileName(fileName, 'original');
+  const ext = extFromMime(mimetype);
+  if (!ext || ext === 'bin') return safeName;
+  const lowerName = safeName.toLowerCase();
+  const suffix = `.${ext.toLowerCase()}`;
+  if (lowerName.endsWith(suffix)) return safeName;
+  return `${safeName}${suffix}`;
+}
 
-  const task = resolveTaskForInboundMedia(phone);
+async function processInboundDownloadedMedia({
+  phone,
+  task,
+  instanceId,
+  messageId,
+  mediaType,
+  caption,
+  downloaded,
+  source = 'unknown',
+}) {
   const inboxDir = resolve(config.runsDir, task.task_id, 'inbox', String(messageId || `msg-${Date.now()}`));
   mkdirSync(inboxDir, { recursive: true });
 
-  await sendMessage(phone, `📥 Midia recebida. Processando... (task: *${task.task_id}*)`);
-
-  const downloaded = await downloadMedia(instanceId, { type: mediaType, message: msgObj, asDataUrl: true });
   const size = Number(downloaded.size || 0);
   if (Number.isFinite(size) && size > config.media.maxBytes) {
     throw new Error(`Media too large: ${size} bytes (max ${config.media.maxBytes})`);
   }
 
   const mimetype = downloaded.mimetype || null;
-  const ext = extFromMime(mimetype);
-  const safeName = safeFileName(downloaded.fileName, 'original');
-  const originalPath = resolve(inboxDir, `${safeName}.${ext}`);
+  const storedName = buildStoredFileName(downloaded.fileName, mimetype);
+  const originalPath = resolve(inboxDir, storedName);
   const metaPath = resolve(inboxDir, 'meta.json');
   const derivedPath = resolve(inboxDir, 'derived.json');
 
@@ -1242,9 +1350,10 @@ async function handleInboundMedia({ phone, instanceId, data }) {
     messageId,
     mediaType,
     mimetype,
-    fileName: downloaded.fileName || null,
+    fileName: storedName,
     size: buf.length,
     caption: caption || null,
+    source,
     savedAt: new Date().toISOString(),
     path: originalPath,
   }, null, 2) + '\n', 'utf-8');
@@ -1253,10 +1362,11 @@ async function handleInboundMedia({ phone, instanceId, data }) {
   let visionText = '';
 
   if (mediaType === 'audio' || mediaType === 'voice') {
+    const ext = extFromMime(mimetype);
     const r = await transcribeAudioFile({
       filePath: originalPath,
       mimetype: mimetype || 'application/octet-stream',
-      fileName: `${safeName}.${ext}`,
+      fileName: storedName || `audio.${ext || 'bin'}`,
     });
     transcriptText = r.text || '';
     writeFileSync(derivedPath, JSON.stringify({ kind: 'audio', transcript: transcriptText, raw: r.raw || null }, null, 2) + '\n', 'utf-8');
@@ -1275,7 +1385,7 @@ async function handleInboundMedia({ phone, instanceId, data }) {
       writeFileSync(derivedPath, JSON.stringify({ kind: 'image', description: visionText }, null, 2) + '\n', 'utf-8');
     }
   } else {
-    writeFileSync(derivedPath, JSON.stringify({ kind: mediaType, note: 'unsupported media type (saved only)' }, null, 2) + '\n', 'utf-8');
+    writeFileSync(derivedPath, JSON.stringify({ kind: mediaType, note: 'generic file (saved only)' }, null, 2) + '\n', 'utf-8');
   }
 
   const canonical = buildCanonicalMediaMessage({
@@ -1289,6 +1399,85 @@ async function handleInboundMedia({ phone, instanceId, data }) {
   });
 
   await routeToTask(phone, task.task_id, canonical);
+}
+
+async function handleInboundMedia({ phone, instanceId, data }) {
+  const media = data?.media;
+  const mediaType = media?.type || data?.type || null;
+  const msgObj = media?.message || null;
+  if (!instanceId) throw new Error('missing instanceId');
+  if (!mediaType || !msgObj) throw new Error('missing media payload');
+
+  const messageId = data.messageId || data.message_id || null;
+  const caption = data?.content?.caption || data?.content?.text || '';
+  const task = resolveTaskForInboundMedia(phone);
+
+  await sendMessage(phone, `📥 Midia recebida. Processando... (task: *${task.task_id}*)`);
+
+  const downloaded = await downloadMedia(instanceId, { type: mediaType, message: msgObj, asDataUrl: true });
+  await processInboundDownloadedMedia({
+    phone,
+    task,
+    instanceId,
+    messageId,
+    mediaType,
+    caption,
+    downloaded,
+    source: 'whatsapp',
+  });
+}
+
+async function handleInboundDiscordAttachments({
+  phone,
+  instanceId,
+  messageId,
+  text,
+  attachments,
+}) {
+  const list = Array.isArray(attachments) ? attachments.filter((a) => a?.url) : [];
+  if (list.length === 0) return;
+  if (!instanceId) throw new Error('missing instanceId');
+
+  const task = resolveTaskForInboundMedia(phone);
+  const textCaption = String(text || '').trim();
+  const baseMessageId = String(messageId || `msg-${Date.now()}`);
+
+  await sendMessage(
+    phone,
+    `📥 ${list.length} anexo(s) do Discord recebido(s). Processando... (task: *${task.task_id}*)`
+  );
+
+  for (let i = 0; i < list.length; i++) {
+    const item = list[i];
+    const mediaType = normalizeInboundMediaType(item?.kind || item?.mimetype || 'file');
+    const attachmentMessageId = `${baseMessageId}-${i + 1}`;
+    const label = item?.fileName ? ` (${item.fileName})` : '';
+
+    try {
+      const downloaded = await downloadDiscordAttachment({
+        url: item?.url,
+        fileName: item?.fileName || null,
+        mimetype: item?.mimetype || null,
+        size: item?.size ?? null,
+      });
+
+      await processInboundDownloadedMedia({
+        phone,
+        task,
+        instanceId,
+        messageId: attachmentMessageId,
+        mediaType,
+        caption: textCaption || '',
+        downloaded,
+        source: 'discord',
+      });
+    } catch (err) {
+      await sendMessage(
+        phone,
+        `❌ Falha ao processar anexo ${i + 1}/${list.length}${label}: ${truncate(err?.message || 'erro desconhecido', 800)}`
+      );
+    }
+  }
 }
 
 async function processUserMessage(phone, text, meta = {}) {
@@ -1412,6 +1601,13 @@ async function routeToTask(phone, taskId, message, messageMeta = {}) {
 
   taskStore.setUserFocusedTask(phone, task.task_id);
   taskStore.insertTaskMessage(task.task_id, 'user', message);
+  insertChatHistorySafe({
+    phone,
+    taskId: task.task_id,
+    projectId: task.project_id,
+    role: 'user',
+    content: message,
+  });
 
   const activeRun = taskStore.getActiveRunForTask(task.task_id);
   if (activeRun) {
@@ -1501,6 +1697,18 @@ async function routeToTask(phone, taskId, message, messageMeta = {}) {
   try {
     taskStore.insertTaskMessage(task.task_id, 'system', `PLAN ${JSON.stringify({ ...plan, provider: orchestration.providerUsed })}`);
   } catch {}
+  const planActionSummary = summarizePlanAction(plan);
+  const actionsWithExplicitMessage = new Set(['reply', 'memory_show', 'memory_clear', 'memory_set', 'memory_append']);
+  if (!actionsWithExplicitMessage.has(plan.action)) {
+    insertChatHistorySafe({
+      phone,
+      taskId: task.task_id,
+      projectId: task.project_id,
+      role: 'assistant',
+      content: `Plano definido: action=${plan.action}`,
+      actionSummary: planActionSummary,
+    });
+  }
 
   if (plan.action === 'reply') {
     const reply = String(plan.reply_text || '').trim();
@@ -1509,6 +1717,14 @@ async function routeToTask(phone, taskId, message, messageMeta = {}) {
       return;
     }
     taskStore.insertTaskMessage(task.task_id, 'assistant', reply);
+    insertChatHistorySafe({
+      phone,
+      taskId: task.task_id,
+      projectId: task.project_id,
+      role: 'assistant',
+      content: reply,
+      actionSummary: planActionSummary,
+    });
     taskStore.updateTask(task.task_id, { status: 'waiting', last_update: 'reply' });
     await sendMessage(phone, reply);
     return;
@@ -1638,17 +1854,70 @@ async function routeToTask(phone, taskId, message, messageMeta = {}) {
   }
 
   if (plan.action === 'memory_show') {
+    const memoryScope = String(plan.memory_scope || 'user').toLowerCase();
+    if (memoryScope === 'project') {
+      const mem = taskStore.getProjectMemory(task.project_id, phone);
+      const content = String(mem?.content || '').trim();
+      const reply = `🧠 *Memoria do projeto (${task.project_id})*\n${content ? `\n${content}` : '\n(vazia)'}`;
+      insertChatHistorySafe({
+        phone,
+        taskId: task.task_id,
+        projectId: task.project_id,
+        role: 'assistant',
+        content: reply,
+        actionSummary: planActionSummary,
+      });
+      await sendMessage(phone, reply);
+      taskStore.updateTask(task.task_id, { status: 'waiting', last_update: 'memory_show_project' });
+      return;
+    }
+
     const mem = taskStore.getUserSharedMemory(phone);
     const content = String(mem?.content || '').trim();
-    await sendMessage(phone, `🧠 *Memoria compartilhada*\n${content ? `\n${content}` : '\n(vazia)'}`);
-    taskStore.updateTask(task.task_id, { status: 'waiting', last_update: 'memory_show' });
+    const reply = `🧠 *Memoria compartilhada*\n${content ? `\n${content}` : '\n(vazia)'}`;
+    insertChatHistorySafe({
+      phone,
+      taskId: task.task_id,
+      projectId: task.project_id,
+      role: 'assistant',
+      content: reply,
+      actionSummary: planActionSummary,
+    });
+    await sendMessage(phone, reply);
+    taskStore.updateTask(task.task_id, { status: 'waiting', last_update: 'memory_show_user' });
     return;
   }
 
   if (plan.action === 'memory_clear') {
+    const memoryScope = String(plan.memory_scope || 'user').toLowerCase();
+    if (memoryScope === 'project') {
+      taskStore.clearProjectMemory(task.project_id, phone);
+      const reply = `🗑️ Memoria do projeto *${task.project_id}* limpa.`;
+      insertChatHistorySafe({
+        phone,
+        taskId: task.task_id,
+        projectId: task.project_id,
+        role: 'assistant',
+        content: reply,
+        actionSummary: planActionSummary,
+      });
+      await sendMessage(phone, reply);
+      taskStore.updateTask(task.task_id, { status: 'waiting', last_update: 'memory_clear_project' });
+      return;
+    }
+
     taskStore.clearUserSharedMemory(phone);
-    await sendMessage(phone, '🗑️ Memoria compartilhada limpa.');
-    taskStore.updateTask(task.task_id, { status: 'waiting', last_update: 'memory_clear' });
+    const reply = '🗑️ Memoria compartilhada limpa.';
+    insertChatHistorySafe({
+      phone,
+      taskId: task.task_id,
+      projectId: task.project_id,
+      role: 'assistant',
+      content: reply,
+      actionSummary: planActionSummary,
+    });
+    await sendMessage(phone, reply);
+    taskStore.updateTask(task.task_id, { status: 'waiting', last_update: 'memory_clear_user' });
     return;
   }
 
@@ -1658,9 +1927,35 @@ async function routeToTask(phone, taskId, message, messageMeta = {}) {
       await sendMessage(phone, '❌ Planner retornou memory_text vazio.');
       return;
     }
+    const memoryScope = String(plan.memory_scope || 'user').toLowerCase();
+    if (memoryScope === 'project') {
+      taskStore.setProjectMemory(task.project_id, phone, text);
+      const reply = `✅ Memoria do projeto *${task.project_id}* atualizada.`;
+      insertChatHistorySafe({
+        phone,
+        taskId: task.task_id,
+        projectId: task.project_id,
+        role: 'assistant',
+        content: reply,
+        actionSummary: planActionSummary,
+      });
+      await sendMessage(phone, reply);
+      taskStore.updateTask(task.task_id, { status: 'waiting', last_update: 'memory_set_project' });
+      return;
+    }
+
     taskStore.setUserSharedMemory(phone, text);
-    await sendMessage(phone, '✅ Memoria compartilhada atualizada.');
-    taskStore.updateTask(task.task_id, { status: 'waiting', last_update: 'memory_set' });
+    const reply = '✅ Memoria compartilhada atualizada.';
+    insertChatHistorySafe({
+      phone,
+      taskId: task.task_id,
+      projectId: task.project_id,
+      role: 'assistant',
+      content: reply,
+      actionSummary: planActionSummary,
+    });
+    await sendMessage(phone, reply);
+    taskStore.updateTask(task.task_id, { status: 'waiting', last_update: 'memory_set_user' });
     return;
   }
 
@@ -1670,9 +1965,35 @@ async function routeToTask(phone, taskId, message, messageMeta = {}) {
       await sendMessage(phone, '❌ Planner retornou memory_text vazio.');
       return;
     }
+    const memoryScope = String(plan.memory_scope || 'user').toLowerCase();
+    if (memoryScope === 'project') {
+      taskStore.appendProjectMemory(task.project_id, phone, text);
+      const reply = `✅ Salvo na memoria do projeto *${task.project_id}*.`;
+      insertChatHistorySafe({
+        phone,
+        taskId: task.task_id,
+        projectId: task.project_id,
+        role: 'assistant',
+        content: reply,
+        actionSummary: planActionSummary,
+      });
+      await sendMessage(phone, reply);
+      taskStore.updateTask(task.task_id, { status: 'waiting', last_update: 'memory_append_project' });
+      return;
+    }
+
     taskStore.appendUserSharedMemory(phone, text);
-    await sendMessage(phone, '✅ Salvo na memoria compartilhada.');
-    taskStore.updateTask(task.task_id, { status: 'waiting', last_update: 'memory_append' });
+    const reply = '✅ Salvo na memoria compartilhada.';
+    insertChatHistorySafe({
+      phone,
+      taskId: task.task_id,
+      projectId: task.project_id,
+      role: 'assistant',
+      content: reply,
+      actionSummary: planActionSummary,
+    });
+    await sendMessage(phone, reply);
+    taskStore.updateTask(task.task_id, { status: 'waiting', last_update: 'memory_append_user' });
     return;
   }
 
@@ -1951,10 +2272,14 @@ async function routeToTask(phone, taskId, message, messageMeta = {}) {
     const forced = String(forcedRunnerKind || '').toLowerCase();
     runnerKind = isRunnerKindSupported(forced) ? forced : 'codex-cli';
   }
-  const mem = taskStore.getUserSharedMemory(phone)?.content || '';
-  const prompt = mem && mem.trim()
-    ? `[MEMORIA COMPARTILHADA]\n${mem.trim()}\n\n[PROMPT]\n${String(plan.prompt || message).trim()}`
-    : String(plan.prompt || message).trim();
+  const sharedMemory = taskStore.getUserSharedMemory(phone)?.content || '';
+  const projectMemory = taskStore.getProjectMemory(task.project_id, phone)?.content || '';
+  const prompt = buildPromptWithMemories({
+    prompt: String(plan.prompt || message).trim(),
+    sharedMemory,
+    projectMemory,
+    projectId: task.project_id,
+  });
   if (plan.title) taskStore.updateTask(task.task_id, { title: String(plan.title).slice(0, 120) });
 
   await executor.enqueueTaskRun({ phone, task, prompt, runnerKind });
@@ -1967,7 +2292,7 @@ export function normalizeWhatsAppPayload(payload) {
   const data = payload?.data;
   if (!data) return null;
 
-  if (data.type !== 'text' && data.type !== 'image' && data.type !== 'audio' && data.type !== 'voice') return null;
+  if (data.type !== 'text' && data.type !== 'image' && data.type !== 'audio' && data.type !== 'voice' && data.type !== 'file') return null;
   if (data.isGroup) return null;
   if (data.fromMe) return null;
 
@@ -2019,7 +2344,7 @@ export async function processInboundMessage(payload) {
     if (!transport || !actorId) return;
 
     const type = String(payload?.type || '').trim().toLowerCase();
-    if (type !== 'text' && type !== 'image' && type !== 'audio' && type !== 'voice') return;
+    if (type !== 'text' && type !== 'image' && type !== 'audio' && type !== 'voice' && type !== 'file') return;
 
     if (transport === 'whatsapp') {
       if (!isWhatsAppAuthorized(actorId)) {
@@ -2057,20 +2382,36 @@ export async function processInboundMessage(payload) {
     logger.info({ actorId, transport, type }, 'Inbound message');
 
     if (type === 'text') {
-      const text = String(payload?.text || '').trim();
-      if (!text) return;
-
+      const rawText = String(payload?.text || '');
+      const text = rawText.trim();
+      const isSlashCommand = text.startsWith('/');
+      const attachments = transport === 'discord' && Array.isArray(payload?.attachments)
+        ? payload.attachments
+        : [];
       const meta = {
         transport,
         senderId: payload?.senderId || null,
       };
 
-      if (text.startsWith('/')) {
-        const handled = await handleCommand(actorId, text, meta);
-        if (handled) return;
+      if (text) {
+        if (isSlashCommand) {
+          const handled = await handleCommand(actorId, text, meta);
+          if (handled) return;
+        }
+
+        await processUserMessage(actorId, text, meta);
       }
 
-      await processUserMessage(actorId, text, meta);
+      if (transport === 'discord' && attachments.length > 0 && !isSlashCommand) {
+        await handleInboundDiscordAttachments({
+          phone: actorId,
+          instanceId: instanceId || config.discord.instanceId || 'discord',
+          messageId: messageId || null,
+          text,
+          attachments,
+        });
+      }
+
       return;
     }
 
