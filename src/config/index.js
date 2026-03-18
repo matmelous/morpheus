@@ -11,7 +11,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const appRoot = resolve(__dirname, '../..');
 
 const RunnerKindSchema = z.string().trim().min(1);
-const OrchestratorProviderSchema = z.enum(['gemini-cli', 'openrouter', 'auto']);
+const OrchestratorProviderSchema = z.enum(['gemini-cli', 'openrouter', 'codex-cli', 'auto']);
 const TokenEstimatorModeSchema = z.enum(['provider_fallback_estimate']);
 const TokenNotificationLevelSchema = z.enum(['summary']);
 
@@ -37,6 +37,7 @@ const EnvSchema = z.object({
 
   WHATSAPP_INSTANCE_ID: z.string().optional().default('morpheus-standalone'),
   WHATSAPP_AUTH_DIR: z.string().optional().default('./data/whatsapp-auth'),
+  WHATSAPP_ENABLED: z.string().optional().default('true'),
 
   DISCORD_ENABLED: z.string().optional().default('false'),
   DISCORD_BOT_TOKEN: z.string().optional().default(''),
@@ -125,6 +126,7 @@ export const config = {
 
   whatsappInstanceId: env.WHATSAPP_INSTANCE_ID,
   whatsappAuthDir: resolve(appRoot, env.WHATSAPP_AUTH_DIR),
+  whatsappEnabled: parseBool(env.WHATSAPP_ENABLED, true),
 
   discord: {
     enabled: parseBool(env.DISCORD_ENABLED, false),
