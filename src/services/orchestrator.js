@@ -5,6 +5,7 @@ import { validatePlan } from '../planner/schema.js';
 import { buildPlannerMessages } from '../planner/prompt.js';
 import { planWithGeminiCli } from '../planner/gemini-cli.js';
 import { planWithOpenRouter } from '../planner/openrouter.js';
+import { planWithCodexCli } from '../planner/codex-cli.js';
 import { isRunnerKindSupported, listRunnerCatalog, listSupportedRunnerKinds } from '../runners/index.js';
 import { taskStore } from './task-store.js';
 import { getOrchestratorProviderDefault, getRunnerDefault } from './settings.js';
@@ -58,6 +59,7 @@ function normalizeProvider(value) {
   if (!v) return null;
   if (v === 'openrouter') return 'openrouter';
   if (v === 'gemini-cli') return 'gemini-cli';
+  if (v === 'codex-cli') return 'codex-cli';
   if (v === 'auto') return 'auto';
   return null;
 }
@@ -159,7 +161,7 @@ export async function orchestrateTaskMessage({
       `Tambem pode falar em linguagem natural, ex.:\n` +
       `- "troca pro projeto argo"\n` +
       `- "usa runner claude nesta task"\n` +
-      `- "muda orchestrator para openrouter"`;
+      `- "muda orchestrator para openrouter/codex-cli"`;
 
     return {
       plan: { version: 1, action: 'reply', reply_text: reply },
@@ -242,9 +244,11 @@ export async function orchestrateTaskMessage({
 
   const providersToTry = [];
   const now = Date.now();
-  const geminiInCooldown = providerPref !== 'openrouter' && geminiCircuit.untilMs && now < geminiCircuit.untilMs;
+  const geminiInCooldown = providerPref !== 'openrouter' && providerPref !== 'codex-cli' && geminiCircuit.untilMs && now < geminiCircuit.untilMs;
 
-  if (providerPref === 'openrouter' || geminiInCooldown) {
+  if (providerPref === 'codex-cli') {
+    providersToTry.push('codex-cli');
+  } else if (providerPref === 'openrouter' || geminiInCooldown) {
     providersToTry.push('openrouter');
   } else {
     providersToTry.push('gemini-cli', 'openrouter');
@@ -266,6 +270,16 @@ export async function orchestrateTaskMessage({
         });
         assistantText = result.assistantText;
         providerMeta = { model: result.model, sessionId: result.sessionId };
+        providerUsage = normalizeTokenUsage(result.usage, 'provider');
+      } else if (provider === 'codex-cli') {
+        const result = await planWithCodexCli({
+          systemPrompt: system,
+          userPrompt,
+          timeoutMs: config.plannerTimeoutMs,
+          config,
+        });
+        assistantText = result.assistantText;
+        providerMeta = { model: result.model };
         providerUsage = normalizeTokenUsage(result.usage, 'provider');
       } else if (provider === 'openrouter') {
         const result = await planWithOpenRouter({

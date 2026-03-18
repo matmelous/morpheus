@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
 export const RunnerKindSchema = z.string().trim().min(1);
-export const OrchestratorProviderSchema = z.enum(['gemini-cli', 'openrouter', 'auto']);
+export const OrchestratorProviderSchema = z.enum(['gemini-cli', 'openrouter', 'codex-cli', 'auto']);
 export const PlanActionSchema = z.enum([
   'run',
   'reply',

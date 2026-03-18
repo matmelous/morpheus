@@ -29,7 +29,7 @@ function buildPlanSchema(runnerKinds) {
   "scope"?: "task" | "user" | "global",
 
   // when action = "set_orchestrator"
-  "provider": "gemini-cli" | "openrouter" | "auto",
+  "provider": "gemini-cli" | "openrouter" | "codex-cli" | "auto",
   "scope"?: "user" | "global",
 
   // when action = "set_task_policy"

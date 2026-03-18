@@ -386,7 +386,7 @@ async function handleCommand(phone, rawText, meta = {}) {
       `/project-clone <id> <gitUrl> [--dir d] [--depth 1] [--type t] [--name ...] - (admin) Clonar no DEVELOPMENT_ROOT + registrar\n` +
       `/project-rm <id> - (admin) Remover projeto\n` +
       `/runner [kind] - Ver/alterar runner (${listRunnerKindsText({ includeAuto: true })})\n` +
-      `/orchestrator [provider] - Ver/alterar planner (gemini-cli|openrouter|auto)\n\n` +
+      `/orchestrator [provider] - Ver/alterar planner (gemini-cli|openrouter|codex-cli|auto)\n\n` +
       `/task-policy [taskIdLen] [historyLimit] - Ver/alterar politica de tasks\n\n` +
       `/confirm - Confirmar uma compra pendente (quando solicitado)\n\n` +
       `/memory - Ver memoria compartilhada\n` +
@@ -1150,7 +1150,7 @@ async function handleCommand(phone, rawText, meta = {}) {
 
   if (cmd === '/orchestrator') {
     const provider = (parts[1] || '').toLowerCase();
-    const allowed = new Set(['gemini-cli', 'openrouter', 'auto']);
+    const allowed = new Set(['gemini-cli', 'openrouter', 'codex-cli', 'auto']);
 
     if (!provider) {
       const user = taskStore.getUser(phone);
@@ -1174,7 +1174,7 @@ async function handleCommand(phone, rawText, meta = {}) {
       }
       const v = (parts[2] || '').toLowerCase();
       if (!allowed.has(v)) {
-        await sendMessage(phone, '❌ Use: /orchestrator global gemini-cli|openrouter|auto');
+        await sendMessage(phone, '❌ Use: /orchestrator global gemini-cli|openrouter|codex-cli|auto');
         return true;
       }
       setSetting(SettingsKeys.orchestratorProviderDefault, v);
@@ -1183,7 +1183,7 @@ async function handleCommand(phone, rawText, meta = {}) {
     }
 
     if (!allowed.has(provider)) {
-      await sendMessage(phone, '❌ Use: /orchestrator gemini-cli|openrouter|auto');
+      await sendMessage(phone, '❌ Use: /orchestrator gemini-cli|openrouter|codex-cli|auto');
       return true;
     }
 
@@ -1800,10 +1800,10 @@ async function routeToTask(phone, taskId, message, messageMeta = {}) {
   if (plan.action === 'set_orchestrator') {
     const provider = String(plan.provider || '').toLowerCase();
     const scope = String(plan.scope || 'user').toLowerCase();
-    const allowed = new Set(['gemini-cli', 'openrouter', 'auto']);
+    const allowed = new Set(['gemini-cli', 'openrouter', 'codex-cli', 'auto']);
 
     if (!allowed.has(provider)) {
-      await sendMessage(phone, '❌ Orchestrator invalido. Use: gemini-cli|openrouter|auto');
+      await sendMessage(phone, '❌ Orchestrator invalido. Use: gemini-cli|openrouter|codex-cli|auto');
       return;
     }
 
