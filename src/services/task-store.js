@@ -110,6 +110,12 @@ class TaskStore {
       .run(provider || null, nowIso(), phone);
   }
 
+  setUserLogLevel(phone, logLevel) {
+    this.ensureUser(phone);
+    this.db.prepare('UPDATE users SET log_level_override = ?, updated_at = ? WHERE phone = ?')
+      .run(logLevel || null, nowIso(), phone);
+  }
+
   setUserFocusedTask(phone, taskId) {
     this.ensureUser(phone);
     this.db.prepare('UPDATE users SET focused_task_id = ?, updated_at = ? WHERE phone = ?')
@@ -262,6 +268,7 @@ class TaskStore {
       'last_update',
       'last_error',
       'runner_kind',
+      'runner_model',
       'project_id',
       'cwd',
       'total_input_tokens',
@@ -322,6 +329,128 @@ class TaskStore {
 
   getRun(runId) {
     return this.db.prepare('SELECT * FROM task_runs WHERE run_id = ?').get(runId) || null;
+  }
+
+  getLatestRunForTask(taskId) {
+    return this.db.prepare(
+      `SELECT * FROM task_runs
+       WHERE task_id = ?
+       ORDER BY created_at DESC
+       LIMIT 1`
+    ).get(taskId) || null;
+  }
+
+  insertRunLog({ runId, taskId, stream = 'stdout', content }) {
+    const text = String(content ?? '');
+    if (!text) return null;
+
+    const info = this.db.prepare(`
+      INSERT INTO task_run_logs
+        (run_id, task_id, stream, content, created_at)
+      VALUES
+        (?, ?, ?, ?, ?)
+    `).run(
+      String(runId),
+      String(taskId),
+      String(stream || 'stdout'),
+      text,
+      nowIso()
+    );
+
+    return Number(info.lastInsertRowid || 0) || null;
+  }
+
+  listRunLogsByRun(runId, { afterId = 0, limit = 200 } = {}) {
+    const cappedLimit = Math.max(1, Math.min(5000, Number(limit) || 200));
+    const minId = Math.max(0, Number(afterId) || 0);
+    return this.db.prepare(
+      `SELECT id, run_id, task_id, stream, content, created_at
+       FROM task_run_logs
+       WHERE run_id = ? AND id > ?
+       ORDER BY id ASC
+       LIMIT ?`
+    ).all(String(runId), minId, cappedLimit);
+  }
+
+  listRunLogsTailByRun(runId, limit = 200) {
+    const cappedLimit = Math.max(1, Math.min(5000, Number(limit) || 200));
+    const rows = this.db.prepare(
+      `SELECT id, run_id, task_id, stream, content, created_at
+       FROM task_run_logs
+       WHERE run_id = ?
+       ORDER BY id DESC
+       LIMIT ?`
+    ).all(String(runId), cappedLimit);
+    return rows.reverse();
+  }
+
+  listRunLogsByTask(taskId, { afterId = 0, limit = 200 } = {}) {
+    const cappedLimit = Math.max(1, Math.min(5000, Number(limit) || 200));
+    const minId = Math.max(0, Number(afterId) || 0);
+    return this.db.prepare(
+      `SELECT id, run_id, task_id, stream, content, created_at
+       FROM task_run_logs
+       WHERE task_id = ? AND id > ?
+       ORDER BY id ASC
+       LIMIT ?`
+    ).all(String(taskId), minId, cappedLimit);
+  }
+
+  insertTaskAuditLog({
+    taskId,
+    runId = null,
+    stage = 'system',
+    level = 'info',
+    event = 'event',
+    content = '',
+    metaJson = null,
+  }) {
+    const taskIdNorm = String(taskId || '').trim();
+    const eventNorm = String(event || '').trim();
+    const contentNorm = String(content ?? '');
+    if (!taskIdNorm || !eventNorm || !contentNorm) return null;
+
+    const info = this.db.prepare(`
+      INSERT INTO task_audit_logs
+        (task_id, run_id, stage, level, event, content, meta_json, created_at)
+      VALUES
+        (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      taskIdNorm,
+      runId ? String(runId).trim() : null,
+      String(stage || 'system').trim() || 'system',
+      String(level || 'info').trim() || 'info',
+      eventNorm,
+      contentNorm,
+      metaJson ? String(metaJson) : null,
+      nowIso()
+    );
+
+    return Number(info.lastInsertRowid || 0) || null;
+  }
+
+  listTaskAuditLogsByTask(taskId, { afterId = 0, limit = 200 } = {}) {
+    const cappedLimit = Math.max(1, Math.min(5000, Number(limit) || 200));
+    const minId = Math.max(0, Number(afterId) || 0);
+    return this.db.prepare(
+      `SELECT id, task_id, run_id, stage, level, event, content, meta_json, created_at
+       FROM task_audit_logs
+       WHERE task_id = ? AND id > ?
+       ORDER BY id ASC
+       LIMIT ?`
+    ).all(String(taskId || '').trim(), minId, cappedLimit);
+  }
+
+  listTaskAuditLogTailByTask(taskId, limit = 200) {
+    const cappedLimit = Math.max(1, Math.min(5000, Number(limit) || 200));
+    const rows = this.db.prepare(
+      `SELECT id, task_id, run_id, stage, level, event, content, meta_json, created_at
+       FROM task_audit_logs
+       WHERE task_id = ?
+       ORDER BY id DESC
+       LIMIT ?`
+    ).all(String(taskId || '').trim(), cappedLimit);
+    return rows.reverse();
   }
 
   listQueuedRuns(limit = 50) {

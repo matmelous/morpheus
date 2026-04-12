@@ -9,6 +9,7 @@ import {
   sendFile,
   sendImage,
   sendMessage,
+  upsertMessage,
 } from './messenger.js';
 
 test('messenger routes sendMessage by actorId', async () => {
@@ -117,6 +118,23 @@ test('messenger sendAudio/sendFile fallback to text for WhatsApp actors', async 
   assert.equal(calls.length, 2);
   assert.match(calls[0][1], /WhatsApp/i);
   assert.match(calls[1][1], /WhatsApp/i);
+
+  __resetMessengerAdaptersForTest();
+});
+
+test('messenger upsertMessage edits Discord message when supported', async () => {
+  const calls = [];
+  __setMessengerAdaptersForTest({
+    upsertDiscordMessage: async (channelId, text, { messageId }) => {
+      calls.push([channelId, text, messageId]);
+      return { primaryMessageId: 'msg-1', messageIds: ['msg-1'], edited: true };
+    },
+  });
+
+  const out = await upsertMessage('dc:123:456', 'status atualizado', { messageId: 'msg-0' });
+
+  assert.deepEqual(calls, [['456', 'status atualizado', 'msg-0']]);
+  assert.equal(out.primaryMessageId, 'msg-1');
 
   __resetMessengerAdaptersForTest();
 });

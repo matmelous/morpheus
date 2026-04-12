@@ -4,6 +4,7 @@ import {
   sendDiscordFile,
   sendDiscordImage,
   sendDiscordMessage,
+  upsertDiscordMessage,
 } from './discord.js';
 
 const DISCORD_PREFIX = 'dc:';
@@ -12,6 +13,7 @@ let adapters = {
   sendWhatsAppMessage,
   sendWhatsAppImage,
   sendDiscordMessage,
+  upsertDiscordMessage,
   sendDiscordImage,
   sendDiscordAudio,
   sendDiscordFile,
@@ -73,6 +75,17 @@ export async function sendMessage(actorId, text) {
   return adapters.sendWhatsAppMessage(actorId, text);
 }
 
+export async function upsertMessage(actorId, text, { messageId = null } = {}) {
+  if (isDiscordActorId(actorId)) {
+    const parsed = parseDiscordActorId(actorId);
+    if (!parsed) throw new Error(`Invalid Discord actorId: ${actorId}`);
+    return adapters.upsertDiscordMessage(parsed.channelId, text, { messageId });
+  }
+
+  await adapters.sendWhatsAppMessage(actorId, text);
+  return { primaryMessageId: null, messageIds: [], edited: false };
+}
+
 export async function sendImage(actorId, { base64, caption, fileName, mimetype } = {}) {
   if (isDiscordActorId(actorId)) {
     return sendDiscordMediaWithFallback(actorId, 'imagem', { caption, fileName }, async (channelId) => {
@@ -117,6 +130,7 @@ export function __resetMessengerAdaptersForTest() {
     sendWhatsAppMessage,
     sendWhatsAppImage,
     sendDiscordMessage,
+    upsertDiscordMessage,
     sendDiscordImage,
     sendDiscordAudio,
     sendDiscordFile,
@@ -127,6 +141,7 @@ export default {
   isDiscordActorId,
   parseDiscordActorId,
   sendMessage,
+  upsertMessage,
   sendImage,
   sendAudio,
   sendFile,

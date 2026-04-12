@@ -47,12 +47,13 @@ const EnvSchema = z.object({
   DISCORD_MESSAGE_MAX_LENGTH: z.coerce.number().int().positive().default(1900),
   DISCORD_MEDIA_MAX_BYTES: z.coerce.number().int().positive().default(8 * 1024 * 1024),
 
-  ALLOWED_PHONE_NUMBERS: z.string().min(1),
+  ALLOWED_PHONE_NUMBERS: z.string().optional().default(''),
   ADMIN_PHONE_NUMBERS: z.string().optional().default(''),
 
   DEFAULT_PROJECT_ID: z.string().optional().default(''),
 
   ORCHESTRATOR_PROVIDER: OrchestratorProviderSchema.optional().default('gemini-cli'),
+  ORCHESTRATOR_PROVIDER_FORCE_ENV: z.string().optional().default('false'),
 
   OPENROUTER_API_KEY: z.string().optional().default(''),
   OPENROUTER_MODEL: z.string().optional().default('google/gemini-3-pro-preview'),
@@ -72,6 +73,9 @@ const EnvSchema = z.object({
   RUNNER_MODULES_DIR: z.string().optional().default('./runner-modules'),
 
   CODEX_CLI_COMMAND: z.string().optional().default(''),
+  CODEX_MODEL: z.string().optional().default(''),
+  CODEX_MODEL_REASONING_EFFORT: z.string().optional().default(''),
+  CODEX_SERVICE_TIER: z.string().optional().default(''),
   CLAUDE_CLI_COMMAND: z.string().optional().default(''),
   CURSOR_AGENT_COMMAND: z.string().optional().default(''),
 
@@ -79,6 +83,7 @@ const EnvSchema = z.object({
   CLAUDE_PERMISSION_MODE: z.string().optional().default('bypassPermissions'),
   CLAUDE_OUTPUT_FORMAT: z.string().optional().default('stream-json'),
   CLAUDE_VERBOSE: z.string().optional().default('true'),
+  CLAUDE_DISABLE_COMMIT_ATTRIBUTION: z.string().optional().default('true'),
 
   CODEX_SANDBOX_MODE: z.string().optional().default('danger-full-access'),
   CODEX_SKIP_GIT_REPO_CHECK: z.string().optional().default('true'),
@@ -94,6 +99,7 @@ const EnvSchema = z.object({
   PENDING_SELECTION_TTL_MS: z.coerce.number().int().positive().default(120000),
 
   REPORT_INTERVAL_MS: z.coerce.number().int().nonnegative().default(60000),
+  REPORT_RUN_LOGS_ENABLED: z.string().optional().default('false'),
 
   PLANNER_TIMEOUT_MS: z.coerce.number().int().positive().default(120000),
   PLANNER_MAX_CONTEXT_MESSAGES: z.coerce.number().int().positive().default(12),
@@ -111,9 +117,6 @@ const EnvSchema = z.object({
 const env = EnvSchema.parse(process.env);
 
 const allowedPhoneNumbers = parseCsvList(env.ALLOWED_PHONE_NUMBERS);
-if (allowedPhoneNumbers.length === 0) {
-  throw new Error('ALLOWED_PHONE_NUMBERS must contain at least one phone number');
-}
 
 export const config = {
   appRoot,
@@ -144,6 +147,7 @@ export const config = {
   defaultProjectId: env.DEFAULT_PROJECT_ID,
 
   orchestratorProvider: env.ORCHESTRATOR_PROVIDER,
+  orchestratorProviderForceEnv: parseBool(env.ORCHESTRATOR_PROVIDER_FORCE_ENV, false),
   openrouter: {
     apiKey: env.OPENROUTER_API_KEY,
     model: env.OPENROUTER_MODEL,
@@ -175,10 +179,14 @@ export const config = {
     permissionMode: env.CLAUDE_PERMISSION_MODE,
     outputFormat: env.CLAUDE_OUTPUT_FORMAT,
     verbose: parseBool(env.CLAUDE_VERBOSE, true),
+    disableCommitAttribution: parseBool(env.CLAUDE_DISABLE_COMMIT_ATTRIBUTION, true),
   },
 
   codex: {
     command: normalizeCliCommandForPlatform(env.CODEX_CLI_COMMAND || 'codex'),
+    model: env.CODEX_MODEL,
+    modelReasoningEffort: env.CODEX_MODEL_REASONING_EFFORT,
+    serviceTier: env.CODEX_SERVICE_TIER,
     sandboxMode: env.CODEX_SANDBOX_MODE,
     skipGitRepoCheck: parseBool(env.CODEX_SKIP_GIT_REPO_CHECK, true),
     useDangerouslyBypassApprovals: parseBool(env.CODEX_USE_DANGEROUSLY_BYPASS_APPROVALS, false),
@@ -197,6 +205,7 @@ export const config = {
   pendingSelectionTtlMs: env.PENDING_SELECTION_TTL_MS,
 
   reportIntervalMs: env.REPORT_INTERVAL_MS,
+  reportRunLogsEnabled: parseBool(env.REPORT_RUN_LOGS_ENABLED, false),
 
   plannerTimeoutMs: env.PLANNER_TIMEOUT_MS,
   plannerMaxContextMessages: env.PLANNER_MAX_CONTEXT_MESSAGES,
@@ -214,6 +223,9 @@ export const config = {
 };
 
 export function validateConfig() {
+  if (config.whatsappEnabled && config.allowedPhoneNumbers.length === 0) {
+    throw new Error('ALLOWED_PHONE_NUMBERS must contain at least one phone number when WHATSAPP_ENABLED=true');
+  }
   if (config.discord.enabled && !String(config.discord.botToken || '').trim()) {
     throw new Error('DISCORD_BOT_TOKEN is required when DISCORD_ENABLED=true');
   }

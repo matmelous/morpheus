@@ -147,11 +147,13 @@ Guia completo:
 Resumo:
 
 - Um bot pode atender vários servidores (`DISCORD_ALLOWED_GUILD_IDS`);
+- os slash commands nativos são registrados automaticamente para cada guild permitida na inicialização;
+- `channel-enable` oferece autocomplete para projeto e runner;
 - cada canal precisa ser habilitado com `/channel-enable`;
 - cada canal habilitado opera com task fixa própria;
 - envio/recebimento de mídia no Discord suporta imagem, áudio e arquivo genérico;
-- comandos com barra (`/...`) ignoram anexos para evitar efeito colateral;
 - canais não habilitados ficam em silêncio.
+- O WhatsApp pode ser desligado com `WHATSAPP_ENABLED=false`; nesse modo `ALLOWED_PHONE_NUMBERS` deixa de ser obrigatório.
 
 ## Projetos
 
@@ -168,7 +170,7 @@ Comandos úteis:
 - `/project <id>`;
 - `/project-add <id> <cwd> [type] [name...]` (admin);
 - `/project-base` (admin);
-- `/project-scan` (admin);
+- `/project-scan` (admin, faz varredura recursiva em `DEVELOPMENT_ROOT` e encontra repositórios git em subpastas, além de pastas locais no nível raiz);
 - `/project-mkdir <id> <dir> [--type t] [--name ...]` (admin);
 - `/project-clone <id> <gitUrl> [--dir d] [--depth 1] [--type t] [--name ...]` (admin);
 - `/project-rm <id>` (admin).

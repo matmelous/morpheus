@@ -75,10 +75,14 @@ async function startServer() {
   });
 
   executor.start();
-  try {
-    await startWhatsAppClient();
-  } catch (err) {
-    logger.error({ error: err?.message }, 'Failed to initialize WhatsApp standalone client');
+  if (config.whatsappEnabled) {
+    try {
+      await startWhatsAppClient();
+    } catch (err) {
+      logger.error({ error: err?.message }, 'Failed to initialize WhatsApp standalone client');
+    }
+  } else {
+    logger.info('WhatsApp standalone client disabled by WHATSAPP_ENABLED=false');
   }
   if (config.discord.enabled) {
     try {

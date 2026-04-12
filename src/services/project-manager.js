@@ -1,11 +1,39 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync } from 'fs';
-import { resolve, dirname, normalize, isAbsolute, sep } from 'path';
+import { resolve, dirname, normalize, isAbsolute, relative, sep } from 'path';
 import { fileURLToPath } from 'url';
 import { logger } from '../utils/logger.js';
 import { config } from '../config/index.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PROJECTS_FILE = resolve(__dirname, '../../projects.json');
+const SCAN_MAX_DEPTH = 4;
+const TOP_LEVEL_PROJECT_MARKERS = new Set([
+  'package.json',
+  'pyproject.toml',
+  'go.mod',
+  'Cargo.toml',
+  'composer.json',
+  'Gemfile',
+  'requirements.txt',
+  'docker-compose.yml',
+  'docker-compose.yaml',
+  'Dockerfile',
+  'Makefile',
+]);
+const DISCOVERY_IGNORED_DIRS = new Set([
+  '.git',
+  'node_modules',
+  '.next',
+  'dist',
+  'build',
+  'coverage',
+  'tmp',
+  'temp',
+  'vendor',
+  'Pods',
+  '.idea',
+  '.vscode',
+]);
 
 class ProjectManager {
   constructor() {
@@ -45,6 +73,72 @@ class ProjectManager {
       throw new Error('Resolved path is outside DEVELOPMENT_ROOT');
     }
     return full;
+  }
+
+  _shouldIgnoreDiscoveryDir(name) {
+    const raw = String(name || '').trim();
+    if (!raw) return true;
+    if (raw.startsWith('.')) return true;
+    return DISCOVERY_IGNORED_DIRS.has(raw);
+  }
+
+  _isTopLevelProjectDirectory(absPath) {
+    let entries = [];
+    try {
+      entries = readdirSync(absPath, { withFileTypes: true });
+    } catch {
+      return false;
+    }
+
+    return entries.some((entry) => {
+      if (entry.isDirectory()) {
+        return entry.name.endsWith('.xcodeproj') || entry.name.endsWith('.xcworkspace');
+      }
+
+      return TOP_LEVEL_PROJECT_MARKERS.has(entry.name);
+    });
+  }
+
+  _discoverDevelopmentProjects(devRoot) {
+    const discovered = [];
+    const seen = new Set();
+    const stack = [{ dir: devRoot, depth: 0 }];
+
+    while (stack.length > 0) {
+      const current = stack.pop();
+      if (!current) continue;
+
+      let entries = [];
+      try {
+        entries = readdirSync(current.dir, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+
+      if (current.depth > 0) {
+        const hasGitDir = entries.some((entry) => entry.isDirectory() && entry.name === '.git');
+        const isTopLevelProject = current.depth === 1 && this._isTopLevelProjectDirectory(current.dir);
+        if (hasGitDir || isTopLevelProject) {
+          if (!seen.has(current.dir)) {
+            discovered.push(current.dir);
+            seen.add(current.dir);
+          }
+        }
+      }
+
+      if (current.depth >= SCAN_MAX_DEPTH) continue;
+
+      const childDirs = entries
+        .filter((entry) => entry.isDirectory() && !this._shouldIgnoreDiscoveryDir(entry.name))
+        .map((entry) => resolve(current.dir, entry.name))
+        .sort((a, b) => a.localeCompare(b));
+
+      for (let index = childDirs.length - 1; index >= 0; index -= 1) {
+        stack.push({ dir: childDirs[index], depth: current.depth + 1 });
+      }
+    }
+
+    return discovered.sort((a, b) => a.localeCompare(b));
   }
 
   _readProjectsFile() {
@@ -172,17 +266,15 @@ class ProjectManager {
     const usedIds = new Set(existing.map((p) => p?.id).filter(Boolean));
     const usedCwds = new Set(existing.map((p) => p?.cwd).filter(Boolean));
 
-    const entries = readdirSync(devRoot, { withFileTypes: true })
-      .filter((d) => d.isDirectory())
-      .map((d) => d.name)
-      .filter((name) => name && !name.startsWith('.'));
-
     const added = [];
-    for (const name of entries) {
-      const cwd = resolve(devRoot, name);
+    const discovered = this._discoverDevelopmentProjects(devRoot);
+
+    for (const cwd of discovered) {
       if (usedCwds.has(cwd)) continue;
 
-      let id = this._slugifyId(name);
+      const rel = relative(devRoot, cwd) || cwd;
+      const name = rel.split(sep).filter(Boolean).pop() || rel;
+      let id = this._slugifyId(rel.replaceAll(sep, '-'));
       if (!id) continue;
       if (usedIds.has(id)) {
         let n = 2;

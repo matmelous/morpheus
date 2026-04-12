@@ -147,11 +147,13 @@ Full guide:
 Summary:
 
 - One bot can serve multiple guilds (`DISCORD_ALLOWED_GUILD_IDS`);
+- native slash commands are registered automatically for each allowed guild on startup;
+- `channel-enable` supports autocomplete for project and runner selection;
 - each channel must be enabled with `/channel-enable`;
 - each enabled channel uses its own fixed task context;
 - Discord media send/receive is supported for image, audio, and generic files;
-- slash commands (`/...`) ignore attachments for safer command handling;
 - non-enabled channels stay silent.
+- WhatsApp can be disabled with `WHATSAPP_ENABLED=false`; in that mode `ALLOWED_PHONE_NUMBERS` is not required.
 
 ## Projects
 
@@ -168,7 +170,7 @@ Useful commands:
 - `/project <id>`;
 - `/project-add <id> <cwd> [type] [name...]` (admin);
 - `/project-base` (admin);
-- `/project-scan` (admin);
+- `/project-scan` (admin, scans `DEVELOPMENT_ROOT` recursively and picks nested git repos plus top-level local project folders);
 - `/project-mkdir <id> <dir> [--type t] [--name ...]` (admin);
 - `/project-clone <id> <gitUrl> [--dir d] [--depth 1] [--type t] [--name ...]` (admin);
 - `/project-rm <id>` (admin).
