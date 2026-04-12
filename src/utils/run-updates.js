@@ -83,6 +83,30 @@ function formatActivityCounts(stats) {
   return parts;
 }
 
+export function getLatestMeaningfulRunUpdate(rows, { maxChars = 220 } = {}) {
+  const updates = Array.isArray(rows)
+    ? rows
+      .map((row) => {
+        if (typeof row === 'string') return row;
+        if (row && typeof row === 'object') return row.content;
+        return '';
+      })
+      .map((text) => normalizeSpaces(text))
+      .filter(Boolean)
+    : [];
+
+  for (let index = updates.length - 1; index >= 0; index -= 1) {
+    const update = updates[index];
+    const classified = classifyProgressUpdate(update);
+    if (classified.kind === 'empty' || classified.kind === 'noise') continue;
+    if (classified.kind === 'assistant' && classified.text) return clipLine(classified.text, maxChars);
+    if (classified.kind === 'warning' && classified.text) return clipLine(classified.text, maxChars);
+    return clipLine(update, maxChars);
+  }
+
+  return '';
+}
+
 export function summarizeRecentRunActivity(rows, { maxFiles = 3, maxAssistantChars = 220 } = {}) {
   const updates = Array.isArray(rows)
     ? rows

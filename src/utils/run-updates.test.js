@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  getLatestMeaningfulRunUpdate,
   humanizeTaskUpdate,
   summarizeRecentRunActivity,
   summarizeShellCommand,
@@ -67,5 +68,16 @@ test('summarizeRecentRunActivity keeps the latest warning when relevant', () => 
       'Atividade recente: 1 busca.',
       'Aviso do runner: fatal: repository not found',
     ],
+  );
+});
+
+test('getLatestMeaningfulRunUpdate ignores noise and returns the latest useful update', () => {
+  assert.equal(
+    getLatestMeaningfulRunUpdate([
+      { content: 'Preparando runner' },
+      { content: 'Em execução' },
+      { content: 'Verificando status do git' },
+    ]),
+    'Verificando status do git',
   );
 });

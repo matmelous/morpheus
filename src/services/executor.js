@@ -19,7 +19,12 @@ import {
   mergeTokenUsage,
   normalizeTokenUsage,
 } from './token-meter.js';
-import { humanizeTaskUpdate, summarizeRecentRunActivity, summarizeStderrLine } from '../utils/run-updates.js';
+import {
+  getLatestMeaningfulRunUpdate,
+  humanizeTaskUpdate,
+  summarizeRecentRunActivity,
+  summarizeStderrLine,
+} from '../utils/run-updates.js';
 
 function nowIso() {
   return new Date().toISOString();
@@ -380,6 +385,41 @@ function getCompactStatusText(task, recentUpdates = []) {
   return (humanizeTaskUpdate(task.last_update || '') || 'Em execução').trim();
 }
 
+function isGenericSilentStatusText(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  return [
+    '',
+    'na fila',
+    'em execução',
+    'em execucao',
+    'preparando runner',
+    'preparando execução',
+    'preparando execucao',
+  ].includes(normalized);
+}
+
+function normalizeSilentBaseText(value) {
+  return String(value || '').replace(/[.]+$/, '').trim();
+}
+
+export function buildRunStartBaseText({ task, prompt }) {
+  const executionBrief = buildExecutionBrief({ prompt, taskTitle: task?.title });
+  return executionBrief ? `🚀 ${executionBrief}` : '🚀 Iniciando execução';
+}
+
+function resolveSilentStatusBaseText(task, recentUpdates = [], state = {}) {
+  const latestMeaningful = normalizeSilentBaseText(getLatestMeaningfulRunUpdate(recentUpdates));
+  if (latestMeaningful) return latestMeaningful;
+
+  const compact = normalizeSilentBaseText(getCompactStatusText(task, recentUpdates));
+  if (compact && !isGenericSilentStatusText(compact)) return compact;
+
+  const fallbackBaseText = normalizeSilentBaseText(state.fallbackBaseText || '');
+  if (fallbackBaseText) return fallbackBaseText;
+
+  return compact || 'Em execução';
+}
+
 function buildCompactTaskSummary(task, recentUpdates = [], { includeTaskId = false } = {}) {
   const startedAt = task.started_at ? new Date(task.started_at).getTime() : Date.now();
   const elapsed = formatElapsed((Date.now() - startedAt) / 1000);
@@ -394,10 +434,10 @@ function nextSilentDotPhase(previousBaseText, nextBaseText, previousPhase = 0) {
   return (Number(previousPhase) + 1) % 4;
 }
 
-function buildSilentStatusText(task, recentUpdates = [], state = {}, { includeTaskId = false } = {}) {
+export function buildSilentStatusText(task, recentUpdates = [], state = {}, { includeTaskId = false } = {}) {
   const startedAt = task.started_at ? new Date(task.started_at).getTime() : Date.now();
   const elapsed = formatElapsed((Date.now() - startedAt) / 1000);
-  const baseText = getCompactStatusText(task, recentUpdates).replace(/[.]+$/, '').trim() || 'Em execução';
+  const baseText = normalizeSilentBaseText(resolveSilentStatusBaseText(task, recentUpdates, state)) || 'Em execução';
   const phase = nextSilentDotPhase(state.lastBaseText || '', baseText, state.phase || 0);
   const dots = ['.', '..', '...', '..'][phase] || '.';
   const text = includeTaskId
@@ -411,8 +451,16 @@ function buildSilentStatusText(task, recentUpdates = [], state = {}, { includeTa
   };
 }
 
+export function shouldSendNewSilentMessage(previous = {}, next = {}) {
+  const previousBaseText = normalizeSilentBaseText(previous.lastSentBaseText || '');
+  const nextBaseText = normalizeSilentBaseText(next.baseText || '');
+  if (!previousBaseText || !nextBaseText) return false;
+  return previousBaseText !== nextBaseText;
+}
+
 function buildRunStartMessage({ task, run, prompt, logLevel }) {
-  const executionBrief = buildExecutionBrief({ prompt, taskTitle: task.title });
+  const startBaseText = buildRunStartBaseText({ task, prompt });
+  const executionBrief = startBaseText.replace(/^🚀\s*/, '').trim();
   if (!executionBrief) {
     return isVerboseLogLevel(logLevel)
       ? `🚀 *Iniciando*:\n• Task: *${task.task_id}*\n• Projeto: *${task.project_id}*\n• Runner: *${run.runner_kind}*`
@@ -420,7 +468,7 @@ function buildRunStartMessage({ task, run, prompt, logLevel }) {
   }
 
   if (!isVerboseLogLevel(logLevel)) {
-    return `🚀 ${executionBrief}`;
+    return startBaseText;
   }
 
   return (
@@ -725,8 +773,20 @@ class Executor {
       prompt: run.prompt,
       logLevel,
     });
+    const runStartBaseText = buildRunStartBaseText({ task, prompt: run.prompt });
+    const normalizedRunStartBaseText = normalizeSilentBaseText(runStartBaseText);
     if (runStartMessage) {
-      await sendMessage(phone, runStartMessage);
+      const result = await sendMessage(phone, runStartMessage);
+      if (isSilentLogLevel(logLevel) && isDiscordActorId(phone)) {
+        this.silentStatusByRun.set(run.run_id, {
+          messageId: result?.primaryMessageId || null,
+          fallbackBaseText: normalizedRunStartBaseText,
+          lastBaseText: normalizedRunStartBaseText,
+          phase: 0,
+          lastRenderedText: runStartMessage,
+          lastSentBaseText: normalizedRunStartBaseText,
+        });
+      }
     }
 
     const state = {
@@ -1412,6 +1472,7 @@ class Executor {
   async sendSilentPeriodicUpdate(phone, task, run, recentUpdates, { totalTasks = 1 } = {}) {
     const previous = this.silentStatusByRun.get(run.run_id) || {
       messageId: null,
+      fallbackBaseText: '',
       lastBaseText: '',
       phase: 0,
       lastRenderedText: '',
@@ -1421,9 +1482,13 @@ class Executor {
     const next = buildSilentStatusText(task, recentUpdates, previous, { includeTaskId: totalTasks > 1 });
 
     if (isDiscordActorId(phone)) {
-      const result = await upsertMessage(phone, next.text, { messageId: previous.messageId || null });
+      const shouldSendNewMessage = shouldSendNewSilentMessage(previous, next);
+      const result = shouldSendNewMessage
+        ? await sendMessage(phone, next.text)
+        : await upsertMessage(phone, next.text, { messageId: previous.messageId || null });
       this.silentStatusByRun.set(run.run_id, {
         messageId: result?.primaryMessageId || previous.messageId || null,
+        fallbackBaseText: previous.fallbackBaseText || '',
         lastBaseText: next.baseText,
         phase: next.phase,
         lastRenderedText: next.text,
