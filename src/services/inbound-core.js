@@ -5,6 +5,7 @@ import crypto from 'node:crypto';
 import { config } from '../config/index.js';
 import { logger } from '../utils/logger.js';
 import { truncate } from '../utils/text.js';
+import { humanizeTaskUpdate } from '../utils/run-updates.js';
 import { projectManager } from './project-manager.js';
 import { downloadMedia } from './whatsapp.js';
 import { downloadDiscordAttachment } from './discord.js';
@@ -31,6 +32,13 @@ import {
   writePartialSpec,
   writeFinalSpec,
 } from './longrun.js';
+import {
+  MIN_LONGRUN_DOC_LINES,
+  formatLongrunDocumentationIssues,
+  validateLongrunDocumentationSpec,
+} from './longrun-doc-quality.js';
+import { normalizeUserLogLevel, parseUserLogLevel, listUserLogLevels, isVerboseLogLevel } from './log-levels.js';
+import { listSuggestedRunnerModels } from './runner-models.js';
 import {
   startLongrunExecution,
   advanceLongrun,
@@ -278,6 +286,40 @@ function resolveTaskArgForPhone(phone, arg, { limit = 10, projectId = null } = {
   return { taskId: arg, tasks, user };
 }
 
+function isExplicitTaskReferenceArg(arg) {
+  const value = String(arg || '').trim();
+  if (!value) return false;
+  return /^\d+$/.test(value) || /^([a-z0-9]{2}|task-[a-f0-9]{6,})$/i.test(value);
+}
+
+function normalizeRunnerModel(value) {
+  return String(value || '').trim();
+}
+
+function isRunnerModelClearValue(value) {
+  const normalized = normalizeRunnerModel(value).toLowerCase();
+  return normalized === 'clear'
+    || normalized === 'off'
+    || normalized === 'none'
+    || normalized === 'default'
+    || normalized === 'padrao';
+}
+
+function supportsTaskRunnerModel(runnerKind) {
+  return String(runnerKind || '').trim().toLowerCase().startsWith('claude');
+}
+
+function resolveUserLogLevel(phone) {
+  const user = taskStore.getUser(phone);
+  return normalizeUserLogLevel(user?.log_level_override, 'silent');
+}
+
+function formatTaskRunnerLabel(task) {
+  const runner = String(task?.runner_kind || '').trim() || 'unknown';
+  const model = normalizeRunnerModel(task?.runner_model);
+  return model && supportsTaskRunnerModel(runner) ? `${runner}/${model}` : runner;
+}
+
 function isPurchaseConfirmationText(text) {
   const t = String(text || '').trim().toLowerCase();
   if (!t) return false;
@@ -360,6 +402,47 @@ function summarizePlanAction(plan) {
   return JSON.stringify(summary);
 }
 
+function appendTaskAuditLog(taskId, {
+  runId = null,
+  stage = 'system',
+  level = 'info',
+  event = 'event',
+  content = '',
+  meta = null,
+} = {}) {
+  try {
+    taskStore.insertTaskAuditLog({
+      taskId,
+      runId,
+      stage,
+      level,
+      event,
+      content: String(content ?? ''),
+      metaJson: meta == null ? null : JSON.stringify(meta),
+    });
+  } catch {}
+}
+
+function buildScopedExecutionPrompt({ plannerPrompt, userRequest }) {
+  const basePrompt = String(plannerPrompt || '').trim();
+  const request = String(userRequest || '').trim();
+
+  return [
+    '[CONTRATO DE EXECUCAO - OBRIGATORIO]',
+    '1. Execute apenas o que o usuario pediu, sem adicionar escopo nao solicitado.',
+    '2. Use as memorias recebidas como restricoes obrigatorias e contexto prioritario.',
+    '3. Se faltar dado essencial, pare e explique claramente o que falta ao inves de inventar.',
+    '4. Nao faca refatoracoes amplas, mudancas paralelas ou extras sem pedido explicito.',
+    '5. Entregue validacoes objetivas do que foi executado.',
+    '',
+    '[PEDIDO ORIGINAL DO USUARIO]',
+    request || '(pedido nao informado)',
+    '',
+    '[PLANO DO ORQUESTRADOR]',
+    basePrompt || request || '(plano vazio)',
+  ].join('\n');
+}
+
 async function handleCommand(phone, rawText, meta = {}) {
   const parts = rawText.trim().split(/\s+/);
   const cmd = parts[0].toLowerCase();
@@ -371,6 +454,8 @@ async function handleCommand(phone, rawText, meta = {}) {
       `Envie uma mensagem para criar/continuar tasks. Suporta multiplas tasks em paralelo.\n\n` +
       `*Comandos:*\n` +
       `/status [projectId] - Ver tasks recentes (opcional: filtrar por projeto)\n` +
+      `/logs [taskId|numero] [linhas] - Ver logs completos da execucao da task\n` +
+      `/audit [taskId|numero] [linhas] - Ver trilha interna do Morpheus (planner/executor/longrun)\n` +
       `/cancel [taskId|numero] - Cancelar run (fila ou rodando)\n` +
       `/new [texto] - Criar uma nova task (e opcionalmente iniciar)\n` +
       `/task [taskId|numero] - Definir foco da task\n` +
@@ -386,6 +471,8 @@ async function handleCommand(phone, rawText, meta = {}) {
       `/project-clone <id> <gitUrl> [--dir d] [--depth 1] [--type t] [--name ...] - (admin) Clonar no DEVELOPMENT_ROOT + registrar\n` +
       `/project-rm <id> - (admin) Remover projeto\n` +
       `/runner [kind] - Ver/alterar runner (${listRunnerKindsText({ includeAuto: true })})\n` +
+      `/model [taskId|numero] [modelo|clear] - Ver/alterar modelo da task atual para runners Claude\n` +
+      `/loglevel [silent|normal|verbose] - Ver/alterar o nivel de logs no canal/conversa\n` +
       `/orchestrator [provider] - Ver/alterar planner (gemini-cli|openrouter|codex-cli|auto)\n\n` +
       `/task-policy [taskIdLen] [historyLimit] - Ver/alterar politica de tasks\n\n` +
       `/confirm - Confirmar uma compra pendente (quando solicitado)\n\n` +
@@ -574,13 +661,95 @@ async function handleCommand(phone, rawText, meta = {}) {
 
     const lines = tasks.map((t, i) => {
       const focus = user?.focused_task_id === t.task_id ? ' ← foco' : '';
-      const upd = (t.last_update || '').toString().slice(0, 120);
+      const upd = humanizeTaskUpdate(t.last_update || '') || 'Sem atualizacao ainda';
       const queued = taskStore.listExecutionItems(t.task_id).length;
-      return `${i + 1}) *${t.task_id}* (${t.status}) [${t.runner_kind}] (${t.project_id})${focus}\n   ${upd || '...'}${queued ? ` | fila: ${queued}` : ''} `;
+      return `${i + 1}) *${t.task_id}* (${t.status}) [${formatTaskRunnerLabel(t)}] (${t.project_id})${focus}\n   ${upd || '...'}${queued ? ` | fila: ${queued}` : ''} `;
     });
 
     const head = projectFilter ? `📊 *Tasks recentes (${projectFilter}):*` : '📊 *Tasks recentes:*';
     await sendMessage(phone, `${head}\n\n${lines.join('\n')}\n\nUse /task 1 para focar, ou /cancel 1 para cancelar.`);
+    return true;
+  }
+
+  if (cmd === '/logs') {
+    const arg = parts[1];
+    const linesArg = Number(parts[2] || 80);
+    const { taskId } = resolveTaskArgForPhone(phone, arg, { limit: 10 });
+    if (!taskId) {
+      await sendMessage(phone, '❌ Informe um taskId (ou use /status e depois /logs 1).');
+      return true;
+    }
+
+    const task = taskStore.getTask(taskId);
+    if (!task || task.phone !== phone) {
+      await sendMessage(phone, `❌ Task nao encontrada: *${taskId}*`);
+      return true;
+    }
+
+    const run = taskStore.getActiveRunForTask(taskId) || taskStore.getLatestRunForTask(taskId);
+    if (!run) {
+      await sendMessage(phone, `📭 A task *${taskId}* ainda nao possui execucoes.`);
+      return true;
+    }
+
+    const take = Number.isFinite(linesArg) ? Math.max(1, Math.min(500, Math.trunc(linesArg))) : 80;
+    const rows = taskStore.listRunLogsTailByRun(run.run_id, take);
+    if (rows.length === 0) {
+      await sendMessage(
+        phone,
+        `📭 Sem logs registrados para *${taskId}* (run *${run.run_id}*).` +
+        `\nStatus run: *${run.status}*`
+      );
+      return true;
+    }
+
+    const rendered = rows
+      .map((row) => `${row.created_at} [${row.stream}] ${row.content}`)
+      .join('\n');
+
+    await sendMessage(
+      phone,
+      `📜 *Logs da task ${taskId}*\n` +
+      `Run: *${run.run_id}* (${run.status})\n` +
+      `Linhas exibidas: ${rows.length}\n\n` +
+      `${rendered}`
+    );
+    return true;
+  }
+
+  if (cmd === '/audit') {
+    const arg = parts[1];
+    const linesArg = Number(parts[2] || 120);
+    const { taskId } = resolveTaskArgForPhone(phone, arg, { limit: 10 });
+    if (!taskId) {
+      await sendMessage(phone, '❌ Informe um taskId (ou use /status e depois /audit 1).');
+      return true;
+    }
+
+    const task = taskStore.getTask(taskId);
+    if (!task || task.phone !== phone) {
+      await sendMessage(phone, `❌ Task nao encontrada: *${taskId}*`);
+      return true;
+    }
+
+    const take = Number.isFinite(linesArg) ? Math.max(1, Math.min(500, Math.trunc(linesArg))) : 120;
+    const rows = taskStore.listTaskAuditLogTailByTask(taskId, take);
+    if (rows.length === 0) {
+      await sendMessage(phone, `📭 Sem trilha interna registrada para *${taskId}* ainda.`);
+      return true;
+    }
+
+    const rendered = rows.map((row) => {
+      const runPart = row.run_id ? ` run=${row.run_id}` : '';
+      return `${row.created_at} [${row.stage}/${row.level}] ${row.event}${runPart}\n${row.content}`;
+    }).join('\n');
+
+    await sendMessage(
+      phone,
+      `🧠 *Audit Morpheus da task ${taskId}*\n` +
+      `Linhas exibidas: ${rows.length}\n\n` +
+      `${rendered}`
+    );
     return true;
   }
 
@@ -709,7 +878,7 @@ async function handleCommand(phone, rawText, meta = {}) {
       `🆕 *Nova task criada*\n` +
       `• Task: *${task.task_id}*\n` +
       `• Projeto: *${project.id}*\n` +
-      `• Runner: *${runnerKind}*`
+      `• Runner: *${formatTaskRunnerLabel(task)}*`
     );
 
     if (prompt) {
@@ -727,7 +896,12 @@ async function handleCommand(phone, rawText, meta = {}) {
 
     if (!arg) {
       if (user?.focused_task_id) {
-        await sendMessage(phone, `🎯 Foco atual: *${user.focused_task_id}*`);
+        const focused = taskStore.getTask(user.focused_task_id);
+        if (focused && focused.phone === phone) {
+          await sendMessage(phone, `🎯 Foco atual: *${focused.task_id}* (${focused.project_id}, ${formatTaskRunnerLabel(focused)})`);
+        } else {
+          await sendMessage(phone, `🎯 Foco atual: *${user.focused_task_id}*`);
+        }
       } else {
         await sendMessage(phone, '🎯 Nenhum foco definido. Use /status e depois /task 1.');
       }
@@ -745,7 +919,7 @@ async function handleCommand(phone, rawText, meta = {}) {
     }
 
     taskStore.setUserFocusedTask(phone, task.task_id);
-    await sendMessage(phone, `🎯 Foco atualizado: *${task.task_id}* (${task.project_id}, ${task.runner_kind})`);
+    await sendMessage(phone, `🎯 Foco atualizado: *${task.task_id}* (${task.project_id}, ${formatTaskRunnerLabel(task)})`);
     return true;
   }
 
@@ -881,7 +1055,8 @@ async function handleCommand(phone, rawText, meta = {}) {
       `• Habilitado: *${row && Number(row.enabled) === 1 ? 'sim' : 'nao'}*\n` +
       `• Task foco: *${focusedTaskId}*\n` +
       `• Projeto default: *${effectiveProject}*\n` +
-      `• Runner efetivo: *${effectiveRunner}*`
+      `• Runner efetivo: *${effectiveRunner}*\n` +
+      `• Logs: *${resolveUserLogLevel(phone)}*`
     );
     return true;
   }
@@ -1145,6 +1320,114 @@ async function handleCommand(phone, rawText, meta = {}) {
         ? `✅ Runner atualizado: *${kind}* (task *${linkedTaskId}* tambem atualizada).`
         : `✅ Runner atualizado: *${kind}*.`
     );
+    return true;
+  }
+
+  if (cmd === '/model') {
+    const tail = rawText.replace(/^\/model\b/i, '').trim();
+    const rawArgs = tail ? tail.split(/\s+/).filter(Boolean) : [];
+
+    let targetTaskId = null;
+    let modelValue = '';
+
+    if (rawArgs.length > 0 && isExplicitTaskReferenceArg(rawArgs[0])) {
+      const resolved = resolveTaskArgForPhone(phone, rawArgs[0], { limit: 10 });
+      const candidate = resolved.taskId ? taskStore.getTask(resolved.taskId) : null;
+      if (candidate && candidate.phone === phone) {
+        targetTaskId = candidate.task_id;
+        modelValue = rawArgs.slice(1).join(' ').trim();
+      }
+    }
+
+    if (!targetTaskId) {
+      const resolved = resolveTaskArgForPhone(phone, null, { limit: 10 });
+      targetTaskId = resolved.taskId || null;
+      modelValue = tail;
+    }
+
+    if (!targetTaskId) {
+      await sendMessage(phone, '❌ Nenhuma task em foco. Use /task <id|numero> antes de definir o modelo.');
+      return true;
+    }
+
+    const task = taskStore.getTask(targetTaskId);
+    if (!task || task.phone !== phone) {
+      await sendMessage(phone, `❌ Task nao encontrada: *${targetTaskId}*`);
+      return true;
+    }
+
+    if (!modelValue) {
+      const currentModel = normalizeRunnerModel(task.runner_model);
+      const availableModels = listSuggestedRunnerModels(task.runner_kind, { taskModel: currentModel });
+      const supportHint = supportsTaskRunnerModel(task.runner_kind)
+        ? 'Este runner Claude vai usar essa configuracao como padrao da task.'
+        : 'Essa configuracao so e usada por runners Claude.';
+      await sendMessage(
+        phone,
+        `🧩 *Modelo da task ${task.task_id}*\n` +
+        `• Projeto: *${task.project_id}*\n` +
+        `• Runner: *${task.runner_kind}*\n` +
+        `• Modelo salvo: *${currentModel || '(padrao do runner)'}*` +
+        (availableModels.length > 0 ? `\n• Sugestoes: *${availableModels.join(', ')}*` : '') +
+        `\n\n` +
+        `${supportHint}\n` +
+        `Use /model ${task.task_id} <modelo> para definir ou /model ${task.task_id} clear para limpar.`
+      );
+      return true;
+    }
+
+    if (isRunnerModelClearValue(modelValue)) {
+      taskStore.updateTask(task.task_id, { runner_model: null });
+      await sendMessage(
+        phone,
+        `✅ Modelo da task *${task.task_id}* limpo.\n` +
+        `Runner: *${task.runner_kind}*\n` +
+        `Agora ela volta a usar o padrao do runner.`
+      );
+      return true;
+    }
+
+    const normalizedModel = normalizeRunnerModel(modelValue);
+    if (!normalizedModel) {
+      await sendMessage(phone, '❌ Use: /model [taskId|numero] <modelo|clear>');
+      return true;
+    }
+
+    taskStore.updateTask(task.task_id, { runner_model: normalizedModel });
+    const supportHint = supportsTaskRunnerModel(task.runner_kind)
+      ? 'Esse modelo sera usado como padrao nesta task.'
+      : 'Modelo salvo na task. Ele passa a valer quando essa task usar um runner Claude.';
+    await sendMessage(
+      phone,
+      `✅ Modelo da task *${task.task_id}* atualizado para *${normalizedModel}*.\n` +
+      `Runner atual: *${task.runner_kind}*\n` +
+      `${supportHint}`
+    );
+    return true;
+  }
+
+  if (cmd === '/loglevel') {
+    const rawLevel = String(parts[1] || '').trim();
+    const current = resolveUserLogLevel(phone);
+    const allowed = listUserLogLevels().join('|');
+
+    if (!rawLevel) {
+      await sendMessage(
+        phone,
+        `🪵 Nivel de logs atual: *${current}*.\n` +
+        `Use /loglevel <${allowed}> para alterar.`
+      );
+      return true;
+    }
+
+    const next = parseUserLogLevel(rawLevel);
+    if (!next) {
+      await sendMessage(phone, `❌ Use: /loglevel <${allowed}>`);
+      return true;
+    }
+
+    taskStore.setUserLogLevel(phone, next);
+    await sendMessage(phone, `✅ Nivel de logs atualizado para *${next}*.`);
     return true;
   }
 
@@ -1563,8 +1846,8 @@ async function processUserMessage(phone, text, meta = {}) {
     taskStore.setPendingSelection(phone, text, candidateTaskIds, expiresAtIso);
 
     const lines = active.slice(0, 6).map((t, i) => {
-      const upd = (t.last_update || '').toString().slice(0, 80);
-      return `${i + 1}) *${t.task_id}* (${t.status}) [${t.runner_kind}] (${t.project_id})\n   ${upd || '...'} `;
+      const upd = humanizeTaskUpdate(t.last_update || '') || 'Sem atualizacao ainda';
+      return `${i + 1}) *${t.task_id}* (${t.status}) [${formatTaskRunnerLabel(t)}] (${t.project_id})\n   ${upd || '...'} `;
     });
 
     await sendMessage(
@@ -1608,10 +1891,29 @@ async function routeToTask(phone, taskId, message, messageMeta = {}) {
     role: 'user',
     content: message,
   });
+  appendTaskAuditLog(task.task_id, {
+    stage: 'inbound',
+    level: 'info',
+    event: 'message_routed',
+    content: String(message || ''),
+    meta: {
+      transport: messageMeta?.transport || null,
+      senderId: messageMeta?.senderId || null,
+      messageId: messageMeta?.messageId || null,
+    },
+  });
 
   const activeRun = taskStore.getActiveRunForTask(task.task_id);
   if (activeRun) {
     const queued = taskStore.enqueueExecutionItem(task.task_id, message);
+    appendTaskAuditLog(task.task_id, {
+      runId: activeRun.run_id,
+      stage: 'queue',
+      level: 'info',
+      event: 'message_enqueued',
+      content: String(message || ''),
+      meta: { queueItemId: queued.id, position: queued.position },
+    });
     await sendMessage(
       phone,
       `🧾 Mensagem adicionada na fila da task *${task.task_id}* (item ${queued.id}, posicao ${queued.position}).\n` +
@@ -1639,6 +1941,16 @@ async function routeToTask(phone, taskId, message, messageMeta = {}) {
 
   let orchestration = null;
   try {
+    appendTaskAuditLog(task.task_id, {
+      stage: 'planner',
+      level: 'info',
+      event: 'orchestration_requested',
+      content: String(message || ''),
+      meta: {
+        forcedRunnerKind,
+        longrunSessionId: longrunSession?.id || null,
+      },
+    });
     orchestration = await orchestrateTaskMessage({
       phone,
       task,
@@ -1647,6 +1959,13 @@ async function routeToTask(phone, taskId, message, messageMeta = {}) {
       longrunSession,
     });
   } catch (err) {
+    appendTaskAuditLog(task.task_id, {
+      stage: 'planner',
+      level: 'error',
+      event: 'orchestration_failed',
+      content: err?.message || String(err),
+      meta: { forcedRunnerKind, fallback: true },
+    });
     logger.warn({ error: err?.message }, 'Orchestrator failed, falling back to direct execution');
     const fallbackRunner = (() => {
       const v = String(forcedRunnerKind || globalRunnerDefault || 'codex-cli').toLowerCase();
@@ -1656,7 +1975,7 @@ async function routeToTask(phone, taskId, message, messageMeta = {}) {
     await sendMessage(
       phone,
       `⚠️ Planner falhou, executando direto com runner *${fallbackRunner}*.\n` +
-      `${truncate(err?.message || 'erro desconhecido', 500)}`
+      `${String(err?.message || 'erro desconhecido')}`
     );
     orchestration = {
       plan: {
@@ -1670,16 +1989,36 @@ async function routeToTask(phone, taskId, message, messageMeta = {}) {
     };
   }
 
-  if (orchestration?.usedFallback) {
+  appendTaskAuditLog(task.task_id, {
+    stage: 'planner',
+    level: 'info',
+    event: 'orchestration_resolved',
+    content: JSON.stringify({
+      providerUsed: orchestration?.providerUsed || null,
+      usedFallback: Boolean(orchestration?.usedFallback),
+      previousErrors: orchestration?.previousErrors || [],
+      circuitBreaker: orchestration?.circuitBreaker || null,
+      tokenUsagePlanner: orchestration?.tokenUsagePlanner || null,
+      planAction: orchestration?.plan?.action || null,
+    }),
+  });
+
+  const userLogLevel = resolveUserLogLevel(phone);
+
+  if (isVerboseLogLevel(userLogLevel) && orchestration?.usedFallback) {
     const err0 = Array.isArray(orchestration.previousErrors) ? orchestration.previousErrors[0] : null;
-    const why = err0?.provider && err0?.error ? ` (${err0.provider}: ${truncate(err0.error, 240)})` : '';
+    const why = err0?.provider && err0?.error ? ` (${err0.provider}: ${String(err0.error)})` : '';
     await sendMessage(phone, `⚠️ Planner usou fallback: *${orchestration.providerUsed}*${why}`);
   }
-  if (!orchestration?.usedFallback && orchestration?.circuitBreaker?.geminiSkipReason) {
+  if (
+    isVerboseLogLevel(userLogLevel)
+    && !orchestration?.usedFallback
+    && orchestration?.circuitBreaker?.geminiSkipReason
+  ) {
     const reason = orchestration.circuitBreaker.geminiSkipReason;
     await sendMessage(phone, `ℹ️ Planner pulou gemini-cli (cooldown por ${reason}). Usando *${orchestration.providerUsed}*.`);
   }
-  if (config.token.notificationLevel === 'summary' && orchestration?.tokenUsagePlanner) {
+  if (isVerboseLogLevel(userLogLevel) && config.token.notificationLevel === 'summary' && orchestration?.tokenUsagePlanner) {
     await sendMessage(
       phone,
       `🧮 ${formatTokenSummaryLine('Tokens planner', orchestration.tokenUsagePlanner)}\n` +
@@ -1689,9 +2028,22 @@ async function routeToTask(phone, taskId, message, messageMeta = {}) {
 
   const plan = orchestration?.plan;
   if (!plan) {
+    appendTaskAuditLog(task.task_id, {
+      stage: 'planner',
+      level: 'error',
+      event: 'plan_empty',
+      content: 'Planner retornou plano vazio.',
+    });
     await sendMessage(phone, '❌ Planner retornou um plano vazio.');
     return;
   }
+  appendTaskAuditLog(task.task_id, {
+    stage: 'planner',
+    level: 'info',
+    event: 'plan_received',
+    content: JSON.stringify(plan),
+    meta: { provider: orchestration.providerUsed || null },
+  });
 
   // Store the plan for audit/debug (task-scoped).
   try {
@@ -1729,6 +2081,19 @@ async function routeToTask(phone, taskId, message, messageMeta = {}) {
     await sendMessage(phone, reply);
     return;
   }
+
+  appendTaskAuditLog(task.task_id, {
+    stage: 'planner',
+    level: 'info',
+    event: 'plan_action_dispatch',
+    content: String(plan.action || ''),
+    meta: {
+      summary: planActionSummary,
+      scope: plan.scope || null,
+      provider: plan.provider || null,
+      runner_kind: plan.runner_kind || null,
+    },
+  });
 
   if (plan.action === 'set_project') {
     const projectId = String(plan.project_id || '').trim();
@@ -2208,6 +2573,28 @@ async function routeToTask(phone, taskId, message, messageMeta = {}) {
       return;
     }
 
+    const docQuality = validateLongrunDocumentationSpec(spec, {
+      minLinesPerSection: MIN_LONGRUN_DOC_LINES,
+    });
+    if (!docQuality.ok) {
+      const issuesText = formatLongrunDocumentationIssues(docQuality.issues, { maxItems: 20 });
+      const issueCount = docQuality.issues.length;
+      taskStore.updateLongrunSession(activeSession.id, {
+        status: 'gathering',
+        spec_json: specJsonRaw,
+        feature_title: spec?.feature?.title || activeSession.feature_title || null,
+      });
+      await sendMessage(
+        phone,
+        `❌ LongRun ainda nao pode ir para confirmacao final.\n` +
+        `Exigencia minima: ${MIN_LONGRUN_DOC_LINES} linhas nao vazias por nivel de documentacao ` +
+        `(feature/wave/epic group/epic/validation/task), com conteudo nao repetitivo.\n\n` +
+        `Pendencias (${issueCount}):\n${issuesText}\n\n` +
+        `Ajuste o spec e tente novamente.`
+      );
+      return;
+    }
+
     const longrunRoot = getLongrunRoot(activeSession.project_cwd, activeSession.feature_uuid);
     ensureLongrunDirs(longrunRoot);
 
@@ -2274,13 +2661,25 @@ async function routeToTask(phone, taskId, message, messageMeta = {}) {
   }
   const sharedMemory = taskStore.getUserSharedMemory(phone)?.content || '';
   const projectMemory = taskStore.getProjectMemory(task.project_id, phone)?.content || '';
+  const scopedPrompt = buildScopedExecutionPrompt({
+    plannerPrompt: String(plan.prompt || message).trim(),
+    userRequest: String(message || '').trim(),
+  });
   const prompt = buildPromptWithMemories({
-    prompt: String(plan.prompt || message).trim(),
+    prompt: scopedPrompt,
     sharedMemory,
     projectMemory,
     projectId: task.project_id,
   });
   if (plan.title) taskStore.updateTask(task.task_id, { title: String(plan.title).slice(0, 120) });
+
+  appendTaskAuditLog(task.task_id, {
+    stage: 'executor',
+    level: 'info',
+    event: 'run_dispatch',
+    content: prompt,
+    meta: { runnerKind, forcedRunnerKind: forcedRunnerKind || null },
+  });
 
   await executor.enqueueTaskRun({ phone, task, prompt, runnerKind });
 }

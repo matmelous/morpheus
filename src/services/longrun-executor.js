@@ -35,7 +35,7 @@ import {
 } from './longrun.js';
 
 // Default runner priority order for LongRun execution.
-export const LONGRUN_RUNNER_PRIORITY = ['claude-cli', 'codex-cli', 'gemini-cli', 'cursor-cli'];
+export const LONGRUN_RUNNER_PRIORITY = ['codex-cli', 'claude-cli', 'gemini-cli', 'cursor-cli'];
 
 // Maximum consecutive auto-correct attempts before giving up.
 const MAX_AUTO_CORRECT_ATTEMPTS = 2;
@@ -55,6 +55,20 @@ const MAX_AUTO_CORRECT_ATTEMPTS = 2;
  */
 export async function startLongrunExecution({ phone, task, session, spec, longrunRoot }) {
   taskStore.updateLongrunSession(session.id, { status: 'running', auto_correct_attempt: 0 });
+  try {
+    taskStore.insertTaskAuditLog({
+      taskId: task.task_id,
+      stage: 'longrun',
+      level: 'info',
+      event: 'longrun_started',
+      content: JSON.stringify({
+        sessionId: session.id,
+        featureUuid: session.feature_uuid,
+        featureTitle: spec.feature?.title || session.feature_title || null,
+        root: longrunRoot,
+      }),
+    });
+  } catch {}
 
   const tasks = readTasksList(longrunRoot);
   const totalTasks = tasks.length;
@@ -140,6 +154,21 @@ export async function advanceLongrun({ phone, task, session, spec, longrunRoot }
     { sessionId: freshSession.id, taskUuid: nextTask.uuid, epic: epic?.title, runnerKind },
     '[LongRun] dispatching task'
   );
+  try {
+    taskStore.insertTaskAuditLog({
+      taskId: task.task_id,
+      stage: 'longrun',
+      level: 'info',
+      event: 'task_dispatched',
+      content: JSON.stringify({
+        sessionId: freshSession.id,
+        taskUuid: nextTask.uuid,
+        runnerKind,
+        epicTitle: epic?.title || null,
+        isLastTaskOfEpic,
+      }),
+    });
+  } catch {}
 
   await executor.enqueueTaskRun({
     phone,
@@ -162,6 +191,16 @@ export async function advanceLongrun({ phone, task, session, spec, longrunRoot }
  */
 export async function onLongrunTaskComplete({ phone, task, session, spec, longrunRoot, completedTaskUuid }) {
   markTaskStatus(longrunRoot, completedTaskUuid, 'done');
+  try {
+    taskStore.insertTaskAuditLog({
+      taskId: task.task_id,
+      stage: 'longrun',
+      level: 'info',
+      event: 'task_completed',
+      content: completedTaskUuid,
+      metaJson: JSON.stringify({ sessionId: session.id }),
+    });
+  } catch {}
 
   const epic = findEpicForTask(spec, completedTaskUuid);
   if (!epic) {
@@ -199,6 +238,16 @@ export async function onLongrunTaskComplete({ phone, task, session, spec, longru
  */
 export async function onLongrunTaskFailed({ phone, session, errorMsg, taskUuid }) {
   taskStore.updateLongrunSession(session.id, { status: 'paused' });
+  try {
+    taskStore.insertTaskAuditLog({
+      taskId: session.task_id,
+      stage: 'longrun',
+      level: 'error',
+      event: 'task_failed',
+      content: `${taskUuid}: ${String(errorMsg || '')}`,
+      metaJson: JSON.stringify({ sessionId: session.id }),
+    });
+  } catch {}
 
   await sendMessage(
     phone,
@@ -237,6 +286,16 @@ export async function onLongrunValidationComplete({ phone, task, session, spec, 
       phone,
       `[LongRun] Validacao OK: *${epic.title}*\nContinuando...`
     );
+    try {
+      taskStore.insertTaskAuditLog({
+        taskId: task.task_id,
+        stage: 'longrun',
+        level: 'info',
+        event: 'epic_validated',
+        content: epic.uuid,
+        metaJson: JSON.stringify({ epicTitle: epic.title, sessionId: freshSession.id }),
+      });
+    } catch {}
 
     logger.info({ sessionId: freshSession.id, epic: epic.title }, '[LongRun] epic validated, advancing');
     await advanceLongrun({ phone, task, session: freshSession, spec, longrunRoot });
@@ -264,6 +323,16 @@ export async function onLongrunValidationComplete({ phone, task, session, spec, 
       `Documentos preservados em:\n${longrunRoot}\n\n` +
       `Revise os documentos, corrija os problemas e inicie um novo LongRun quando pronto.`
     );
+    try {
+      taskStore.insertTaskAuditLog({
+        taskId: task.task_id,
+        stage: 'longrun',
+        level: 'error',
+        event: 'auto_correct_exhausted',
+        content: epic.uuid,
+        metaJson: JSON.stringify({ epicTitle: epic.title, attempts: MAX_AUTO_CORRECT_ATTEMPTS }),
+      });
+    } catch {}
     return;
   }
 
@@ -300,6 +369,15 @@ async function runEpicValidation({ phone, task, session, spec, longrunRoot, epic
     phone,
     `[LongRun] Validando epic: *${epic.title}*\nExecutando instrucoes de validacao...`
   );
+  try {
+    taskStore.insertTaskAuditLog({
+      taskId: task.task_id,
+      stage: 'longrun',
+      level: 'info',
+      event: 'epic_validation_dispatched',
+      content: JSON.stringify({ epicUuid: epic.uuid, epicTitle: epic.title, runnerKind }),
+    });
+  } catch {}
 
   logger.info({ sessionId: session.id, epic: epic.title, runnerKind }, '[LongRun] running epic validation');
 
@@ -340,6 +418,20 @@ async function triggerAutoCorrect({ phone, task, session, spec, longrunRoot, fai
     `Epic auto-correct criado: *auto-correct-${failedEpic.title}*\n\n` +
     `Retomando execucao...`
   );
+  try {
+    taskStore.insertTaskAuditLog({
+      taskId: task.task_id,
+      stage: 'longrun',
+      level: 'warn',
+      event: 'auto_correct_triggered',
+      content: JSON.stringify({
+        failedEpicUuid: failedEpic.uuid,
+        failedEpicTitle: failedEpic.title,
+        autoCorrectEpicUuid: autoCorrectEpic.uuid,
+        attempt,
+      }),
+    });
+  } catch {}
 
   logger.info(
     { sessionId: session.id, autoCorrectEpicUuid: autoCorrectEpic.uuid, attempt },
@@ -366,6 +458,20 @@ async function completeLongrun({ phone, session, spec }) {
     `Epics validados: ${validated}/${total}\n\n` +
     `Todas as tasks foram executadas e validadas.`
   );
+  try {
+    taskStore.insertTaskAuditLog({
+      taskId: session.task_id,
+      stage: 'longrun',
+      level: 'info',
+      event: 'longrun_completed',
+      content: JSON.stringify({
+        sessionId: session.id,
+        featureTitle: spec.feature?.title || session.feature_title || null,
+        validated,
+        total,
+      }),
+    });
+  } catch {}
 
   logger.info({ sessionId: session.id, feature: spec.feature?.title }, '[LongRun] completed');
 }
@@ -397,11 +503,12 @@ function buildTaskPrompt({ taskFile, taskUuid, epic, isLastTaskOfEpic, commitPre
     `1. Implemente exatamente o que a task descreve — nem mais, nem menos.`,
     `2. Ao final, crie um commit com a mensagem: ${commitPrefix}<descricao-breve-da-mudanca>`,
     `   Exemplo: ${commitPrefix}implementar endpoint de login`,
+    `3. Use a identidade git ja configurada no repositorio. Nao adicione trailers, coautoria ou atribuicao do Claude/IA no commit.`,
     isLastTaskOfEpic
-      ? `3. Esta e a ULTIMA task do epic. Certifique-se de que toda a implementacao do epic esta integrada e funcionando antes de commitar.`
-      : `3. Esta NAO e a ultima task do epic. Nao tente implementar o epic completo — apenas esta task.`,
-    `4. O commit deve ser atomico: uma mudanca coesa que passe em lint/tests se aplicavel.`,
-    `5. Nao inclua arquivos nao relacionados com esta task no commit.`,
+      ? `4. Esta e a ULTIMA task do epic. Certifique-se de que toda a implementacao do epic esta integrada e funcionando antes de commitar.`
+      : `4. Esta NAO e a ultima task do epic. Nao tente implementar o epic completo — apenas esta task.`,
+    `5. O commit deve ser atomico: uma mudanca coesa que passe em lint/tests se aplicavel.`,
+    `6. Nao inclua arquivos nao relacionados com esta task no commit.`,
   ].filter((l) => l !== undefined).join('\n');
 }
 

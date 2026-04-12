@@ -1,6 +1,22 @@
 import { normalizeTokenUsage } from '../services/token-meter.js';
 
-export function buildClaudeRun({ prompt, config }) {
+function buildClaudeSettings(config) {
+  const settings = {};
+
+  if (config.claude.disableCommitAttribution) {
+    settings.attribution = { commit: '' };
+  }
+
+  return Object.keys(settings).length > 0 ? settings : null;
+}
+
+function resolveClaudeModel({ config, task }) {
+  const taskModel = String(task?.runner_model || '').trim();
+  if (taskModel) return taskModel;
+  return String(config?.claude?.model || '').trim();
+}
+
+export function buildClaudeRun({ prompt, config, task }) {
   const command = config.claude.command;
 
   const args = ['-p'];
@@ -11,7 +27,11 @@ export function buildClaudeRun({ prompt, config }) {
   if (outputFormat) args.push('--output-format', outputFormat);
 
   if (config.claude.permissionMode) args.push('--permission-mode', config.claude.permissionMode);
-  if (config.claude.model) args.push('--model', config.claude.model);
+  const model = resolveClaudeModel({ config, task });
+  if (model) args.push('--model', model);
+
+  const settings = buildClaudeSettings(config);
+  if (settings) args.push('--settings', JSON.stringify(settings));
 
   args.push(prompt);
 
@@ -40,20 +60,19 @@ function summarizeToolUseBlocks(blocks) {
     const input = b.input || {};
 
     if (name === 'Bash' && input.command) {
-      summaries.push(`Bash: ${String(input.command).slice(0, 120)}`);
+      summaries.push(`Bash: ${String(input.command)}`);
       continue;
     }
     if ((name === 'Read' || name === 'Edit' || name === 'Write') && input.file_path) {
-      const fp = String(input.file_path);
-      summaries.push(`${name}: ${fp.split(/[\\/]/).pop()}`);
+      summaries.push(`${name}: ${String(input.file_path)}`);
       continue;
     }
     if (name === 'Glob' && input.pattern) {
-      summaries.push(`Glob: ${String(input.pattern).slice(0, 80)}`);
+      summaries.push(`Glob: ${String(input.pattern)}`);
       continue;
     }
     if (name === 'Grep' && input.pattern) {
-      summaries.push(`Grep: ${String(input.pattern).slice(0, 80)}`);
+      summaries.push(`Grep: ${String(input.pattern)}`);
       continue;
     }
 
@@ -61,7 +80,7 @@ function summarizeToolUseBlocks(blocks) {
   }
 
   if (summaries.length === 0) return null;
-  return summaries.slice(0, 3).join(' | ');
+  return summaries.join(' | ');
 }
 
 export function claudeParseLine({ obj }) {
@@ -85,7 +104,7 @@ export function claudeParseLine({ obj }) {
     const text = extractTextFromContentBlocks(blocks).trim();
     if (!text) return null;
     return {
-      updateText: `assistant: ${text.slice(0, 160)}`,
+      updateText: `assistant: ${text}`,
       assistantDelta: text + '\n',
       usage,
     };

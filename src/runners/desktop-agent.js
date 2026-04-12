@@ -15,13 +15,13 @@ export function desktopAgentParseLine({ obj, rawLine }) {
   if (!o) return null;
   const usage = normalizeTokenUsage(o, 'provider');
 
-  if (o.type === 'model' && o.model) return { model: String(o.model), updateText: `model: ${String(o.model).slice(0, 80)}`, usage };
-  if (o.type === 'update' && o.text) return { updateText: String(o.text).slice(0, 500), usage };
+  if (o.type === 'model' && o.model) return { model: String(o.model), updateText: `model: ${String(o.model)}`, usage };
+  if (o.type === 'update' && o.text) return { updateText: String(o.text), usage };
 
   if (o.type === 'blocked') {
     return {
       blockedReason: String(o.reason || o.blockedReason || 'blocked'),
-      updateText: `blocked: ${String(o.reason || o.blockedReason || 'blocked').slice(0, 80)}`,
+      updateText: `blocked: ${String(o.reason || o.blockedReason || 'blocked')}`,
       finalResult: o.summary || o.message || null,
       usage,
     };
@@ -38,6 +38,6 @@ export function desktopAgentParseLine({ obj, rawLine }) {
   }
 
   // Fallback for debugging unknown lines
-  if (rawLine && rawLine.length < 200) return { updateText: `event: ${rawLine}`, usage };
+  if (rawLine) return { updateText: `event: ${rawLine}`, usage };
   return usage ? { usage } : null;
 }
