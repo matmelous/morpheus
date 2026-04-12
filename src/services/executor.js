@@ -3,14 +3,14 @@ import { basename, resolve } from 'path';
 import { config } from '../config/index.js';
 import { logger } from '../utils/logger.js';
 import { formatElapsed } from '../utils/time.js';
-import { truncate } from '../utils/text.js';
 import { makeId } from '../utils/ids.js';
 import { spawnStreamingProcess } from '../utils/spawn.js';
 import { getRunner } from '../runners/index.js';
 import { taskStore } from './task-store.js';
-import { sendAudio, sendFile, sendImage, sendMessage } from './messenger.js';
+import { isDiscordActorId, sendAudio, sendFile, sendImage, sendMessage, upsertMessage } from './messenger.js';
 import { safeFileName } from './media-utils.js';
 import { buildPromptWithMemories } from './memory-context.js';
+import { isSilentLogLevel, isVerboseLogLevel, normalizeUserLogLevel } from './log-levels.js';
 import {
   estimateUsage,
   formatTokenSummaryLine,
@@ -19,6 +19,7 @@ import {
   mergeTokenUsage,
   normalizeTokenUsage,
 } from './token-meter.js';
+import { humanizeTaskUpdate, summarizeRecentRunActivity, summarizeStderrLine } from '../utils/run-updates.js';
 
 function nowIso() {
   return new Date().toISOString();
@@ -92,6 +93,150 @@ function inferEvidenceKind(path, mimetype) {
   return 'file';
 }
 
+const IMAGE_PATH_EXT_REGEX = /\.(png|jpe?g|webp|gif|bmp)$/i;
+const AUTO_EVIDENCE_MAX_ITEMS = 3;
+
+function isImageFilePath(path) {
+  return IMAGE_PATH_EXT_REGEX.test(String(path || '').trim());
+}
+
+function sanitizePathToken(token) {
+  let value = String(token || '').trim();
+  if (!value) return '';
+
+  if (
+    (value.startsWith('"') && value.endsWith('"')) ||
+    (value.startsWith("'") && value.endsWith("'")) ||
+    (value.startsWith('`') && value.endsWith('`'))
+  ) {
+    value = value.slice(1, -1).trim();
+  }
+
+  value = value.replace(/^[([{]+/, '').replace(/[)\]}.,;:!?]+$/, '').trim();
+  return value;
+}
+
+function extractImagePathCandidates(text) {
+  const raw = String(text || '');
+  if (!raw) return [];
+
+  const out = [];
+  const patterns = [
+    /[`'"]([^`'"\n\r]+?\.(?:png|jpe?g|webp|gif|bmp))[`'"]/gi,
+    /(?:^|\s)(\/[^\s"'`]+?\.(?:png|jpe?g|webp|gif|bmp))/gi,
+    /(?:^|\s)(\.\.?\/[^\s"'`]+?\.(?:png|jpe?g|webp|gif|bmp))/gi,
+    /(?:^|\s)(runs\/[^\s"'`]+?\.(?:png|jpe?g|webp|gif|bmp))/gi,
+  ];
+
+  for (const pattern of patterns) {
+    let match = null;
+    while ((match = pattern.exec(raw)) !== null) {
+      const candidate = sanitizePathToken(match[1]);
+      if (!candidate) continue;
+      out.push(candidate);
+    }
+  }
+
+  return out;
+}
+
+function resolveExistingImagePath(rawPath, { cwd, artifactsDir } = {}) {
+  let candidate = sanitizePathToken(rawPath);
+  if (!candidate) return null;
+
+  if (candidate.startsWith('file://')) {
+    candidate = candidate.slice('file://'.length).trim();
+  }
+  if (!candidate) return null;
+
+  const variants = new Set([
+    resolve(candidate),
+    cwd ? resolve(cwd, candidate) : null,
+    artifactsDir ? resolve(artifactsDir, candidate) : null,
+  ].filter(Boolean));
+
+  for (const fullPath of variants) {
+    if (!isImageFilePath(fullPath)) continue;
+    if (!existsSync(fullPath)) continue;
+    return fullPath;
+  }
+
+  return null;
+}
+
+function listEvidenceImages(artifactsDir, maxItems = AUTO_EVIDENCE_MAX_ITEMS) {
+  try {
+    const evidenceDir = resolve(artifactsDir, 'evidence');
+    if (!existsSync(evidenceDir)) return [];
+
+    return readdirSync(evidenceDir, { withFileTypes: true })
+      .filter((entry) => entry.isFile())
+      .map((entry) => resolve(evidenceDir, entry.name))
+      .filter((fullPath) => isImageFilePath(fullPath))
+      .sort((a, b) => {
+        let aMtime = 0;
+        let bMtime = 0;
+        try { aMtime = statSync(a).mtimeMs; } catch {}
+        try { bMtime = statSync(b).mtimeMs; } catch {}
+        return bMtime - aMtime;
+      })
+      .slice(0, maxItems);
+  } catch {
+    return [];
+  }
+}
+
+async function sendFallbackEvidenceFromSummary(phone, {
+  summary,
+  cwd,
+  artifactsDir,
+  maxItems = AUTO_EVIDENCE_MAX_ITEMS,
+  alreadySentPaths = [],
+} = {}) {
+  const seen = new Set(
+    (Array.isArray(alreadySentPaths) ? alreadySentPaths : [])
+      .map((p) => String(p || '').trim())
+      .filter(Boolean)
+      .map((p) => resolve(p))
+  );
+
+  const resolvedPaths = [];
+
+  for (const rawPath of extractImagePathCandidates(summary)) {
+    const fullPath = resolveExistingImagePath(rawPath, { cwd, artifactsDir });
+    if (!fullPath) continue;
+    const normalized = resolve(fullPath);
+    if (seen.has(normalized)) continue;
+    seen.add(normalized);
+    resolvedPaths.push(normalized);
+    if (resolvedPaths.length >= maxItems) break;
+  }
+
+  if (resolvedPaths.length < maxItems) {
+    for (const fullPath of listEvidenceImages(artifactsDir, maxItems * 2)) {
+      const normalized = resolve(fullPath);
+      if (seen.has(normalized)) continue;
+      seen.add(normalized);
+      resolvedPaths.push(normalized);
+      if (resolvedPaths.length >= maxItems) break;
+    }
+  }
+
+  let sent = 0;
+  for (const fullPath of resolvedPaths) {
+    try {
+      const ok = await sendEvidenceItem(phone, {
+        path: fullPath,
+        caption: 'Evidencia',
+        fileName: basename(fullPath),
+      });
+      if (ok) sent++;
+    } catch {}
+  }
+
+  return sent;
+}
+
 async function sendEvidenceItem(phone, item) {
   const path = item?.path;
   if (!path || !existsSync(path)) return false;
@@ -149,31 +294,234 @@ function getRunOutputForQuotaCheck(artifactsDir) {
 function extractLastJsonlEventSummary(line) {
   try {
     const obj = JSON.parse(line);
-    if (obj?.type && obj?.text) return `${obj.type}: ${String(obj.text).slice(0, 500)}`;
-    if (obj?.type) return `${obj.type}: ${JSON.stringify(obj).slice(0, 500)}`;
-    return JSON.stringify(obj).slice(0, 500);
+    if (obj?.type && obj?.text) return `${obj.type}: ${String(obj.text)}`;
+    if (obj?.type) return `${obj.type}: ${JSON.stringify(obj)}`;
+    return JSON.stringify(obj);
   } catch {
-    return String(line || '').slice(0, 500);
+    return String(line || '');
   }
 }
 
-/** Max length for execution brief so one sendMessage stays reasonable; Discord split is handled by sendDiscordMessage. */
-const EXECUTION_BRIEF_MAX_LENGTH = 100_000;
+function resolveUserLogLevel(phone) {
+  return normalizeUserLogLevel(taskStore.getUser(phone)?.log_level_override, 'silent');
+}
 
-function buildExecutionBrief({ prompt, taskTitle }) {
-  const marker = '[PROMPT]';
+function extractPromptSection(prompt, startMarker, endMarker = null) {
   const rawPrompt = String(prompt || '').trim();
-  let text = rawPrompt;
+  if (!rawPrompt || !rawPrompt.includes(startMarker)) return '';
 
-  if (rawPrompt.includes(marker)) {
-    text = rawPrompt.slice(rawPrompt.lastIndexOf(marker) + marker.length).trim();
+  const afterStart = rawPrompt.slice(rawPrompt.indexOf(startMarker) + startMarker.length);
+  if (!endMarker || !afterStart.includes(endMarker)) {
+    return afterStart.trim();
   }
 
-  text = text.replace(/\s+/g, ' ').trim();
-  if (!text) text = String(taskTitle || '').replace(/\s+/g, ' ').trim();
+  return afterStart.slice(0, afterStart.indexOf(endMarker)).trim();
+}
+
+function stripLeadingModelDirective(text) {
+  const lines = String(text || '').split(/\r?\n/);
+  while (lines.length > 0) {
+    const line = String(lines[0] || '').trim();
+    if (!line) {
+      lines.shift();
+      continue;
+    }
+
+    if (
+      /^(?:\/model|--model)\s+.+$/i.test(line)
+      || /^(?:model|modelo)\s*[:=]\s*.+$/i.test(line)
+    ) {
+      lines.shift();
+      continue;
+    }
+    break;
+  }
+
+  return lines.join('\n').trim();
+}
+
+function buildExecutionBrief({ prompt, taskTitle }) {
+  const rawPrompt = String(prompt || '').trim();
+  let text =
+    extractPromptSection(rawPrompt, '[PEDIDO ORIGINAL DO USUARIO]', '[PLANO DO ORQUESTRADOR]')
+    || extractPromptSection(rawPrompt, '[PROMPT]')
+    || rawPrompt;
+
+  text = stripLeadingModelDirective(text).trim();
+  if (!text) text = String(taskTitle || '').trim();
   if (!text) return null;
 
-  return truncate(text, EXECUTION_BRIEF_MAX_LENGTH);
+  return text;
+}
+
+function buildPeriodicTaskSummary(task, recentUpdates = []) {
+  const startedAt = task.started_at ? new Date(task.started_at).getTime() : Date.now();
+  const elapsed = formatElapsed((Date.now() - startedAt) / 1000);
+  const lines = [`*${task.task_id}* [${task.runner_kind}] (${task.project_id}) ${elapsed}`];
+  const activityLines = summarizeRecentRunActivity(recentUpdates);
+
+  if (activityLines.length > 0) {
+    for (const line of activityLines) {
+      lines.push(`   ${line}`);
+    }
+    return lines.join('\n');
+  }
+
+  const update = humanizeTaskUpdate(task.last_update || '') || 'Em execução';
+  lines.push(`   Status atual: ${update}.`);
+  return lines.join('\n');
+}
+
+function getCompactStatusText(task, recentUpdates = []) {
+  const activityLines = summarizeRecentRunActivity(recentUpdates);
+  if (activityLines.length > 0) {
+    return String(activityLines[activityLines.length - 1] || '').trim();
+  }
+  return (humanizeTaskUpdate(task.last_update || '') || 'Em execução').trim();
+}
+
+function buildCompactTaskSummary(task, recentUpdates = [], { includeTaskId = false } = {}) {
+  const startedAt = task.started_at ? new Date(task.started_at).getTime() : Date.now();
+  const elapsed = formatElapsed((Date.now() - startedAt) / 1000);
+  const statusText = getCompactStatusText(task, recentUpdates);
+  if (!statusText) return includeTaskId ? `*${task.task_id}* ${elapsed}` : elapsed;
+  return includeTaskId ? `*${task.task_id}* ${statusText} ${elapsed}` : `${statusText} ${elapsed}`;
+}
+
+function nextSilentDotPhase(previousBaseText, nextBaseText, previousPhase = 0) {
+  if (!nextBaseText) return 0;
+  if (previousBaseText !== nextBaseText) return 0;
+  return (Number(previousPhase) + 1) % 4;
+}
+
+function buildSilentStatusText(task, recentUpdates = [], state = {}, { includeTaskId = false } = {}) {
+  const startedAt = task.started_at ? new Date(task.started_at).getTime() : Date.now();
+  const elapsed = formatElapsed((Date.now() - startedAt) / 1000);
+  const baseText = getCompactStatusText(task, recentUpdates).replace(/[.]+$/, '').trim() || 'Em execução';
+  const phase = nextSilentDotPhase(state.lastBaseText || '', baseText, state.phase || 0);
+  const dots = ['.', '..', '...', '..'][phase] || '.';
+  const text = includeTaskId
+    ? `*${task.task_id}* ${baseText}${dots} ${elapsed}`
+    : `${baseText}${dots} ${elapsed}`;
+
+  return {
+    text,
+    phase,
+    baseText,
+  };
+}
+
+function buildRunStartMessage({ task, run, prompt, logLevel }) {
+  const executionBrief = buildExecutionBrief({ prompt, taskTitle: task.title });
+  if (!executionBrief) {
+    return isVerboseLogLevel(logLevel)
+      ? `🚀 *Iniciando*:\n• Task: *${task.task_id}*\n• Projeto: *${task.project_id}*\n• Runner: *${run.runner_kind}*`
+      : null;
+  }
+
+  if (!isVerboseLogLevel(logLevel)) {
+    return `🚀 ${executionBrief}`;
+  }
+
+  return (
+    `🚀 *Iniciando*:\n` +
+    `• Task: *${task.task_id}*\n` +
+    `• Projeto: *${task.project_id}*\n` +
+    `• Runner: *${run.runner_kind}*\n` +
+    `• Entendimento: ${executionBrief}`
+  );
+}
+
+function buildRunOutcomeMessage({
+  status,
+  task,
+  run,
+  logLevel,
+  summary,
+  blockedReason,
+  exitCode,
+  model,
+  runTokenTotals,
+  taskTokenTotals,
+  lastLog = '',
+}) {
+  if (isVerboseLogLevel(logLevel)) {
+    if (status === 'cancelled') {
+      return `🛑 *Cancelado* (${task.project_id})\nTask: *${task.task_id}*`;
+    }
+
+    if (status === 'blocked' && blockedReason === 'purchase_confirmation') {
+      return (
+        `⛔ *Confirmacao necessaria (compra)* (${task.project_id})\n` +
+        `Task: *${task.task_id}*\n` +
+        `${formatTokenSummaryLine('Tokens run', runTokenTotals)}\n` +
+        `Tokens task acumulado: ${Number(taskTokenTotals?.totalTokens || 0)}\n` +
+        `Responda com *CONFIRMO COMPRA* ou envie */confirm* em ate 10 min para continuar.`
+      );
+    }
+
+    if (status === 'blocked') {
+      return (
+        `⛔ *Bloqueado* (${task.project_id})\n` +
+        `Task: *${task.task_id}*\n` +
+        `Runner: *${run.runner_kind}*\n` +
+        `${model ? `Model: *${model}*\n` : ''}` +
+        `${formatTokenSummaryLine('Tokens run', runTokenTotals)}\n` +
+        `Tokens task acumulado: ${Number(taskTokenTotals?.totalTokens || 0)}\n` +
+        `Motivo: *${blockedReason || 'unknown'}*`
+      );
+    }
+
+    if (status === 'done') {
+      return (
+        `✅ *Concluido* (${task.project_id})\n` +
+        `Task: *${task.task_id}*\n` +
+        `Runner: *${run.runner_kind}*\n\n` +
+        `${model ? `Model: *${model}*\n\n` : ''}` +
+        `${formatTokenSummaryLine('Tokens run', runTokenTotals)}\n` +
+        `Tokens task acumulado: ${Number(taskTokenTotals?.totalTokens || 0)}\n\n` +
+        `${summary || '(sem resumo)'}`
+      );
+    }
+
+    return (
+      `❌ *Erro* (${task.project_id})\n` +
+      `Task: *${task.task_id}*\n` +
+      `Runner: *${run.runner_kind}*\n` +
+      `${model ? `Model: *${model}*\n` : ''}` +
+      `${formatTokenSummaryLine('Tokens run', runTokenTotals)}\n` +
+      `Tokens task acumulado: ${Number(taskTokenTotals?.totalTokens || 0)}\n` +
+      `Exit: *${exitCode}*\n` +
+      `${lastLog ? `Ultimo log: ${lastLog}\n` : ''}` +
+      `Artefatos: ${run.artifacts_dir}`
+    );
+  }
+
+  if (status === 'cancelled') {
+    return '🛑 Execucao cancelada.';
+  }
+
+  if (status === 'blocked' && blockedReason === 'purchase_confirmation') {
+    return '⛔ Confirmação necessária para continuar a compra. Responda *CONFIRMO COMPRA* ou envie */confirm* em até 10 min.';
+  }
+
+  if (status === 'blocked') {
+    return `⛔ Execucao bloqueada: ${blockedReason || 'motivo desconhecido'}.`;
+  }
+
+  if (status === 'done') {
+    return `✅ ${summary || 'Concluido.'}`;
+  }
+
+  return (
+    `❌ Falha na execucao (exit ${exitCode}).\n` +
+    `${lastLog ? `Ultimo log: ${lastLog}\n` : ''}` +
+    `Artefatos: ${run.artifacts_dir}`
+  );
+}
+
+function shouldSendLiveRunLogs(phone) {
+  return config.reportRunLogsEnabled && !isDiscordActorId(phone);
 }
 
 async function trySendFailureScreenshot(phone, artifactsDir) {
@@ -204,6 +552,8 @@ class Executor {
     this.schedulerTimer = null;
     this.reportTimer = null;
     this.cleanupTimer = null;
+    this.reportCursorByRun = new Map();
+    this.silentStatusByRun = new Map();
     // Optional hook called after any run completes (used by longrun-executor.js)
     this.onRunComplete = null;
   }
@@ -251,6 +601,7 @@ class Executor {
       try { p.child.kill('SIGKILL'); } catch {}
     }
     this.processes.clear();
+    this.silentStatusByRun.clear();
   }
 
   async enqueueTaskRun({ phone, task, prompt, runnerKind }) {
@@ -274,7 +625,7 @@ class Executor {
     const artifactsDir = resolve(config.runsDir, task.task_id, runId);
     mkdirSync(artifactsDir, { recursive: true });
 
-    const runSpec = runner.build({ prompt, cwd: task.cwd, artifactsDir, config });
+    const runSpec = runner.build({ prompt, cwd: task.cwd, artifactsDir, config, task });
     const run = taskStore.createRunWithId({
       runId,
       taskId: task.task_id,
@@ -335,7 +686,7 @@ class Executor {
       return;
     }
 
-    const runSpec = runner.build({ prompt: run.prompt, cwd: task.cwd, artifactsDir: run.artifacts_dir, config });
+    const runSpec = runner.build({ prompt: run.prompt, cwd: task.cwd, artifactsDir: run.artifacts_dir, config, task });
 
     taskStore.updateRun(run.run_id, {
       status: 'running',
@@ -351,18 +702,32 @@ class Executor {
       last_error: null,
       runner_kind: run.runner_kind,
     });
+    try {
+      taskStore.insertTaskAuditLog({
+        taskId: task.task_id,
+        runId: run.run_id,
+        stage: 'executor',
+        level: 'info',
+        event: 'run_started',
+        content: JSON.stringify({
+          runnerKind: run.runner_kind,
+          cwd: task.cwd,
+          command: safeJsonParse(runSpec.commandJson) || runSpec.commandJson || null,
+        }),
+      });
+    } catch {}
 
     const phone = task.phone;
-    const executionBrief = buildExecutionBrief({ prompt: run.prompt, taskTitle: task.title });
-
-    await sendMessage(
-      phone,
-      `🚀 *Iniciando*:\n` +
-      `• Task: *${task.task_id}*\n` +
-      `• Projeto: *${task.project_id}*\n` +
-      `• Runner: *${run.runner_kind}*` +
-      (executionBrief ? `\n• Entendimento: ${executionBrief}` : '')
-    );
+    const logLevel = resolveUserLogLevel(phone);
+    const runStartMessage = buildRunStartMessage({
+      task,
+      run,
+      prompt: run.prompt,
+      logLevel,
+    });
+    if (runStartMessage) {
+      await sendMessage(phone, runStartMessage);
+    }
 
     const state = {
       runId: run.run_id,
@@ -372,7 +737,6 @@ class Executor {
       assistantBuffer: '',
       usage: null,
     };
-    const maxAssistantBufferChars = 120_000;
 
     const stdoutPath = resolve(run.artifacts_dir, 'stdout.jsonl');
     const stderrPath = resolve(run.artifacts_dir, 'stderr.log');
@@ -384,6 +748,18 @@ class Executor {
     let lastUpdateAt = 0;
     let blockedReason = null;
     let finalised = false;
+    const appendRunLog = (stream, content) => {
+      try {
+        taskStore.insertRunLog({
+          runId: run.run_id,
+          taskId: task.task_id,
+          stream,
+          content,
+        });
+      } catch (err) {
+        logger.warn({ runId: run.run_id, stream, error: err?.message }, 'Failed to persist run log line');
+      }
+    };
 
     writeJson(metaPath, {
       runId: run.run_id,
@@ -395,6 +771,7 @@ class Executor {
       startedAt: run.started_at || nowIso(),
       command: safeJsonParse(runSpec.commandJson) || runSpec.commandJson || null,
     });
+    appendRunLog('system', `run.start task=${task.task_id} runner=${run.runner_kind}`);
 
     const child = spawnStreamingProcess({
       command: runSpec.command,
@@ -405,6 +782,7 @@ class Executor {
       stderrPath,
       timeoutMs: config.taskTimeoutMs,
       onStdoutLine: (line) => {
+        appendRunLog('stdout', line);
         const obj = safeJsonParse(line);
         if (!blockedReason && isQuotaLine(line)) blockedReason = 'quota';
 
@@ -436,13 +814,11 @@ class Executor {
 
         if (parsed?.assistantDelta) {
           state.assistantBuffer += String(parsed.assistantDelta);
-          if (state.assistantBuffer.length > maxAssistantBufferChars) {
-            state.assistantBuffer = state.assistantBuffer.slice(-maxAssistantBufferChars);
-          }
         }
 
-        const update = parsed?.updateText || null;
+        const update = humanizeTaskUpdate(parsed?.updateText || null);
         if (update) {
+          appendRunLog('update', update);
           const now = Date.now();
           // Throttle DB writes.
           if (now - lastUpdateAt >= 1000 || update !== lastUpdate) {
@@ -453,12 +829,16 @@ class Executor {
         }
       },
       onStderrLine: (line) => {
+        appendRunLog('stderr', line);
         if (!blockedReason && isQuotaLine(line)) blockedReason = 'quota';
-        // Keep last stderr line as a hint (throttled).
+        const stderrUpdate = summarizeStderrLine(line);
+        if (!stderrUpdate) return;
+
+        // Keep only meaningful stderr hints as status updates.
         const now = Date.now();
         if (now - lastUpdateAt < 1000) return;
         lastUpdateAt = now;
-        taskStore.updateTask(task.task_id, { last_update: `stderr: ${String(line).slice(0, 120)}` });
+        taskStore.updateTask(task.task_id, { last_update: stderrUpdate });
       },
     });
 
@@ -476,9 +856,22 @@ class Executor {
       finalised = true;
 
       this.processes.delete(run.run_id);
+      this.reportCursorByRun.delete(run.run_id);
+      this.silentStatusByRun.delete(run.run_id);
 
       const endedAt = nowIso();
       const message = err?.message || 'spawn error';
+      appendRunLog('system', `run.error ${message}`);
+      try {
+        taskStore.insertTaskAuditLog({
+          taskId: task.task_id,
+          runId: run.run_id,
+          stage: 'executor',
+          level: 'error',
+          event: 'run_spawn_error',
+          content: message,
+        });
+      } catch {}
 
       taskStore.updateRun(run.run_id, {
         status: 'error',
@@ -499,7 +892,7 @@ class Executor {
         `❌ *Erro ao iniciar* (${task.project_id})\n` +
         `Task: *${task.task_id}*\n` +
         `Runner: *${run.runner_kind}*\n` +
-        `${truncate(message, 500)}`
+        `${message}`
       );
     });
 
@@ -508,6 +901,8 @@ class Executor {
       finalised = true;
 
       this.processes.delete(run.run_id);
+      this.reportCursorByRun.delete(run.run_id);
+      this.silentStatusByRun.delete(run.run_id);
 
       const endedAt = nowIso();
       const exitCode = code == null ? -1 : code;
@@ -517,9 +912,28 @@ class Executor {
         : blockedReason ? 'blocked'
         : exitCode === 0 ? 'done'
         : 'error';
+      appendRunLog('system', `run.close status=${status} exit=${exitCode} blocked=${blockedReason || ''}`);
 
       const summary = await this.readSummaryForRun(run.runner_kind, runSpec, run.artifacts_dir, state);
       writeText(summaryPath, summary || '');
+      try {
+        taskStore.insertTaskAuditLog({
+          taskId: task.task_id,
+          runId: run.run_id,
+          stage: 'executor',
+          level: status === 'error' ? 'error' : status === 'blocked' ? 'warn' : 'info',
+          event: 'run_closed',
+          content: summary || '',
+          metaJson: JSON.stringify({
+            status,
+            exitCode,
+            signal,
+            blockedReason,
+            model: state.model || null,
+            runnerKind: run.runner_kind,
+          }),
+        });
+      } catch {}
 
       const providerUsage = normalizeTokenUsage(state.usage, 'provider');
       const runUsage = providerUsage || estimateUsage({
@@ -607,6 +1021,16 @@ class Executor {
         );
         const currentTask = taskStore.getTask(task.task_id);
         if (currentTask) {
+          try {
+            taskStore.insertTaskAuditLog({
+              taskId: task.task_id,
+              runId: run.run_id,
+              stage: 'executor',
+              level: 'warn',
+              event: 'quota_fallback_triggered',
+              content: `runner=${run.runner_kind} -> codex-cli`,
+            });
+          } catch {}
           const quotaMsg =
             `🔄 *Limite de uso atingido* (${task.project_id})\n` +
             `Task: *${task.task_id}* | Runner anterior: *${run.runner_kind}*\n` +
@@ -629,8 +1053,7 @@ class Executor {
 
       if (summary && summary.trim()) {
         // Task-scoped memory: persist the assistant output per run.
-        const maxChars = 20000;
-        taskStore.insertTaskMessage(task.task_id, 'assistant', summary.trim().slice(0, maxChars));
+        taskStore.insertTaskMessage(task.task_id, 'assistant', summary.trim());
       }
 
       taskStore.updateTask(task.task_id, {
@@ -649,7 +1072,18 @@ class Executor {
       });
 
       if (status === 'cancelled') {
-        const cancelledMsg = `🛑 *Cancelado* (${task.project_id})\nTask: *${task.task_id}*`;
+        const cancelledMsg = buildRunOutcomeMessage({
+          status,
+          task,
+          run,
+          logLevel,
+          summary,
+          blockedReason,
+          exitCode,
+          model: state.model || null,
+          runTokenTotals,
+          taskTokenTotals,
+        });
         appendAssistantHistory(
           cancelledMsg,
           JSON.stringify({ source: 'executor', status, blockedReason, runner_kind: run.runner_kind, exit_code: exitCode })
@@ -677,12 +1111,18 @@ class Executor {
             expiresAtIso,
           });
 
-          const blockedPurchaseMsg =
-            `⛔ *Confirmacao necessaria (compra)* (${task.project_id})\n` +
-            `Task: *${task.task_id}*\n` +
-            `${formatTokenSummaryLine('Tokens run', runTokenTotals)}\n` +
-            `Tokens task acumulado: ${Number(taskTokenTotals?.totalTokens || 0)}\n` +
-            `Responda com *CONFIRMO COMPRA* ou envie */confirm* em ate 10 min para continuar.`;
+          const blockedPurchaseMsg = buildRunOutcomeMessage({
+            status,
+            task,
+            run,
+            logLevel,
+            summary,
+            blockedReason,
+            exitCode,
+            model: state.model || null,
+            runTokenTotals,
+            taskTokenTotals,
+          });
           appendAssistantHistory(
             blockedPurchaseMsg,
             JSON.stringify({ source: 'executor', status, blockedReason, runner_kind: run.runner_kind, exit_code: exitCode })
@@ -695,14 +1135,18 @@ class Executor {
             } catch {}
           }
         } else {
-          const blockedMsg =
-            `⛔ *Bloqueado* (${task.project_id})\n` +
-            `Task: *${task.task_id}*\n` +
-            `Runner: *${run.runner_kind}*\n` +
-            `${state.model ? `Model: *${state.model}*\n` : ''}` +
-            `${formatTokenSummaryLine('Tokens run', runTokenTotals)}\n` +
-            `Tokens task acumulado: ${Number(taskTokenTotals?.totalTokens || 0)}\n` +
-            `Motivo: *${blockedReason || 'unknown'}*`;
+          const blockedMsg = buildRunOutcomeMessage({
+            status,
+            task,
+            run,
+            logLevel,
+            summary,
+            blockedReason,
+            exitCode,
+            model: state.model || null,
+            runTokenTotals,
+            taskTokenTotals,
+          });
           appendAssistantHistory(
             blockedMsg,
             JSON.stringify({ source: 'executor', status, blockedReason, runner_kind: run.runner_kind, exit_code: exitCode })
@@ -710,14 +1154,18 @@ class Executor {
           await sendMessage(phone, blockedMsg);
         }
       } else if (status === 'done') {
-        const doneMsg =
-          `✅ *Concluido* (${task.project_id})\n` +
-          `Task: *${task.task_id}*\n` +
-          `Runner: *${run.runner_kind}*\n\n` +
-          `${state.model ? `Model: *${state.model}*\n\n` : ''}` +
-          `${formatTokenSummaryLine('Tokens run', runTokenTotals)}\n` +
-          `Tokens task acumulado: ${Number(taskTokenTotals?.totalTokens || 0)}\n\n` +
-          `${truncate(summary || '(sem resumo)', 3500)}`;
+        const doneMsg = buildRunOutcomeMessage({
+          status,
+          task,
+          run,
+          logLevel,
+          summary,
+          blockedReason,
+          exitCode,
+          model: state.model || null,
+          runTokenTotals,
+          taskTokenTotals,
+        });
         appendAssistantHistory(
           doneMsg,
           JSON.stringify({ source: 'executor', status, blockedReason, runner_kind: run.runner_kind, exit_code: exitCode })
@@ -728,9 +1176,27 @@ class Executor {
         const result = safeReadJsonFile(resultJsonPath);
         const ev = Array.isArray(result?.evidence) ? result.evidence : [];
         const pick = ev.slice(-3);
+        const sentEvidencePaths = [];
+        let sentEvidenceCount = 0;
         for (const it of pick) {
           try {
-            await sendEvidenceItem(phone, it);
+            const ok = await sendEvidenceItem(phone, it);
+            if (ok) {
+              sentEvidenceCount++;
+              if (it?.path) sentEvidencePaths.push(resolve(String(it.path)));
+            }
+          } catch {}
+        }
+
+        if (sentEvidenceCount === 0) {
+          try {
+            await sendFallbackEvidenceFromSummary(phone, {
+              summary,
+              cwd: task.cwd,
+              artifactsDir: run.artifacts_dir,
+              alreadySentPaths: sentEvidencePaths,
+              maxItems: AUTO_EVIDENCE_MAX_ITEMS,
+            });
           } catch {}
         }
       } else {
@@ -739,16 +1205,19 @@ class Executor {
         const lastStderr = readLastNonEmptyLine(stderrPath);
         const lastLog = lastStdout ? extractLastJsonlEventSummary(lastStdout) : (lastStderr ? `stderr: ${lastStderr}` : '');
 
-        const errorMsg =
-          `❌ *Erro* (${task.project_id})\n` +
-          `Task: *${task.task_id}*\n` +
-          `Runner: *${run.runner_kind}*\n` +
-          `${state.model ? `Model: *${state.model}*\n` : ''}` +
-          `${formatTokenSummaryLine('Tokens run', runTokenTotals)}\n` +
-          `Tokens task acumulado: ${Number(taskTokenTotals?.totalTokens || 0)}\n` +
-          `Exit: *${exitCode}*\n` +
-          `${lastLog ? `Ultimo log: ${truncate(lastLog, 800)}\n` : ''}` +
-          `Artefatos: ${run.artifacts_dir}`;
+        const errorMsg = buildRunOutcomeMessage({
+          status,
+          task,
+          run,
+          logLevel,
+          summary,
+          blockedReason,
+          exitCode,
+          model: state.model || null,
+          runTokenTotals,
+          taskTokenTotals,
+          lastLog,
+        });
         appendAssistantHistory(
           errorMsg,
           JSON.stringify({ source: 'executor', status, blockedReason, runner_kind: run.runner_kind, exit_code: exitCode })
@@ -866,18 +1335,149 @@ class Executor {
     }
 
     for (const [phone, tasks] of byPhone.entries()) {
+      const logLevel = resolveUserLogLevel(phone);
+
+      if (isSilentLogLevel(logLevel)) {
+        for (const task of tasks) {
+          const run = taskStore.getActiveRunForTask(task.task_id);
+          if (!run) continue;
+          const recentUpdates = taskStore
+            .listRunLogsTailByRun(run.run_id, 80)
+            .filter((row) => row.stream === 'update');
+          await this.sendSilentPeriodicUpdate(phone, task, run, recentUpdates, { totalTasks: tasks.length });
+        }
+
+        if (shouldSendLiveRunLogs(phone)) {
+          for (const task of tasks) {
+            const run = taskStore.getActiveRunForTask(task.task_id);
+            if (!run) continue;
+            await this.sendLiveRunLogs(phone, task, run);
+          }
+        }
+        continue;
+      }
+
+      if (!isVerboseLogLevel(logLevel)) {
+        const lines = tasks.slice(0, 5).map((t) => {
+          const run = taskStore.getActiveRunForTask(t.task_id);
+          const recentUpdates = run
+            ? taskStore
+              .listRunLogsTailByRun(run.run_id, 80)
+              .filter((row) => row.stream === 'update')
+            : [];
+          return buildCompactTaskSummary(t, recentUpdates, { includeTaskId: tasks.length > 1 });
+        });
+
+        await sendMessage(phone, lines.join('\n'));
+
+        if (shouldSendLiveRunLogs(phone)) {
+          for (const task of tasks) {
+            const run = taskStore.getActiveRunForTask(task.task_id);
+            if (!run) continue;
+            await this.sendLiveRunLogs(phone, task, run);
+          }
+        }
+        continue;
+      }
+
       const lines = tasks.slice(0, 5).map((t, i) => {
-        const startedAt = t.started_at ? new Date(t.started_at).getTime() : Date.now();
-        const elapsed = formatElapsed((Date.now() - startedAt) / 1000);
-        const upd = (t.last_update || '').toString().slice(0, 160);
-        const totalTokens = Number(t.total_tokens || 0);
-        return `${i + 1}) *${t.task_id}* [${t.runner_kind}] (${t.project_id}) ${elapsed}\n   ${upd || '...'}\n   tokens: ${totalTokens}`;
+        const run = taskStore.getActiveRunForTask(t.task_id);
+        const recentUpdates = run
+          ? taskStore
+            .listRunLogsTailByRun(run.run_id, 80)
+            .filter((row) => row.stream === 'update')
+          : [];
+        return `${i + 1}) ${buildPeriodicTaskSummary(t, recentUpdates)}`;
       });
+
+      const header = tasks.length === 1
+        ? '⏱️ *Atualização (1 task em execução):*'
+        : `⏱️ *Atualização (${tasks.length} tasks em execução):*`;
 
       await sendMessage(
         phone,
-        `⏱️ *Atualizacao (${tasks.length} task(s) rodando):*\n\n${lines.join('\n')}`
+        `${header}\n\n${lines.join('\n\n')}\n\nPara log detalhado, use */logs <taskId>* quando precisar.`
       );
+
+      if (shouldSendLiveRunLogs(phone)) {
+        for (const task of tasks) {
+          const run = taskStore.getActiveRunForTask(task.task_id);
+          if (!run) continue;
+          await this.sendLiveRunLogs(phone, task, run);
+        }
+      }
+    }
+  }
+
+  async sendSilentPeriodicUpdate(phone, task, run, recentUpdates, { totalTasks = 1 } = {}) {
+    const previous = this.silentStatusByRun.get(run.run_id) || {
+      messageId: null,
+      lastBaseText: '',
+      phase: 0,
+      lastRenderedText: '',
+      lastSentBaseText: '',
+    };
+
+    const next = buildSilentStatusText(task, recentUpdates, previous, { includeTaskId: totalTasks > 1 });
+
+    if (isDiscordActorId(phone)) {
+      const result = await upsertMessage(phone, next.text, { messageId: previous.messageId || null });
+      this.silentStatusByRun.set(run.run_id, {
+        messageId: result?.primaryMessageId || previous.messageId || null,
+        lastBaseText: next.baseText,
+        phase: next.phase,
+        lastRenderedText: next.text,
+        lastSentBaseText: next.baseText,
+      });
+      return;
+    }
+
+    if (previous.lastSentBaseText === next.baseText) {
+      this.silentStatusByRun.set(run.run_id, {
+        ...previous,
+        lastBaseText: next.baseText,
+        phase: next.phase,
+        lastRenderedText: next.text,
+      });
+      return;
+    }
+
+    await sendMessage(phone, next.text);
+    this.silentStatusByRun.set(run.run_id, {
+      ...previous,
+      lastBaseText: next.baseText,
+      phase: next.phase,
+      lastRenderedText: next.text,
+      lastSentBaseText: next.baseText,
+    });
+  }
+
+  async sendLiveRunLogs(phone, task, run) {
+    const batchSize = 120;
+    let cursor = Number(this.reportCursorByRun.get(run.run_id) || 0);
+    let sentAny = false;
+
+    while (true) {
+      const rows = taskStore.listRunLogsByRun(run.run_id, { afterId: cursor, limit: batchSize });
+      if (rows.length === 0) break;
+      cursor = Number(rows[rows.length - 1].id || cursor);
+      this.reportCursorByRun.set(run.run_id, cursor);
+
+      const rendered = rows.map((row) => `[${row.stream}] ${row.content}`).join('\n');
+      await sendMessage(
+        phone,
+        `📜 *Logs da task ${task.task_id}* (${task.project_id})\n` +
+        `Run: *${run.run_id}*\n` +
+        `${rendered}`
+      );
+      sentAny = true;
+
+      if (rows.length < batchSize) break;
+    }
+
+    if (!sentAny) {
+      // Ensure next periodic call only sends truly new lines after this checkpoint.
+      this.reportCursorByRun.set(run.run_id, cursor);
     }
   }
 

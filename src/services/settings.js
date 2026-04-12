@@ -17,6 +17,12 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+function getEnvOrchestratorDefault() {
+  const provider = String(config.orchestratorProvider || '').trim().toLowerCase();
+  if (!provider || provider === 'auto') return 'gemini-cli';
+  return provider;
+}
+
 export function getSetting(key) {
   const db = getDb();
   const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
@@ -34,7 +40,7 @@ export function setSetting(key, value) {
 
 export function ensureDefaultSettings() {
   const defaults = new Map([
-    [SettingsKeys.orchestratorProviderDefault, config.orchestratorProvider === 'auto' ? 'gemini-cli' : config.orchestratorProvider],
+    [SettingsKeys.orchestratorProviderDefault, getEnvOrchestratorDefault()],
     [SettingsKeys.runnerDefault, config.runnerDefault],
     [SettingsKeys.maxParallelTasks, String(config.maxParallelTasks)],
     [SettingsKeys.maxParallelGuiTasks, String(config.maxParallelGuiTasks)],
@@ -56,7 +62,11 @@ export function getRunnerDefault() {
 }
 
 export function getOrchestratorProviderDefault() {
-  return getSetting(SettingsKeys.orchestratorProviderDefault) || (config.orchestratorProvider === 'auto' ? 'gemini-cli' : config.orchestratorProvider);
+  if (config.orchestratorProviderForceEnv) {
+    return getEnvOrchestratorDefault();
+  }
+
+  return getSetting(SettingsKeys.orchestratorProviderDefault) || getEnvOrchestratorDefault();
 }
 
 function parsePositiveIntOr(defaultValue, raw, { min = 1, max = Number.MAX_SAFE_INTEGER } = {}) {

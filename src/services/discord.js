@@ -3,11 +3,21 @@ import {
   Client,
   GatewayIntentBits,
   Partials,
+  REST,
 } from 'discord.js';
 
 import { config } from '../config/index.js';
 import { logger } from '../utils/logger.js';
+import { projectManager } from './project-manager.js';
 import { extFromMime, safeFileName } from './media-utils.js';
+import { listSupportedRunnerKinds } from '../runners/index.js';
+import { taskStore } from './task-store.js';
+import { listSuggestedRunnerModels } from './runner-models.js';
+import {
+  buildDiscordCommandRegistrationRequests,
+  getDiscordAutocompleteChoices,
+  slashInteractionToLegacyText,
+} from './discord-commands.js';
 
 /** Discord API limit for message content (characters). */
 const DISCORD_API_MAX_CONTENT = 2000;
@@ -218,6 +228,139 @@ async function handleMessageCreate(message) {
   }
 }
 
+async function syncDiscordSlashCommands(activeClient) {
+  const token = String(config.discord.botToken || '').trim();
+  const guildIds = Array.isArray(config.discord.allowedGuildIds)
+    ? config.discord.allowedGuildIds.map((guildId) => String(guildId || '').trim()).filter(Boolean)
+    : [];
+
+  if (!token || guildIds.length === 0) return;
+
+  const app = await activeClient.application?.fetch();
+  const applicationId = String(app?.id || activeClient.application?.id || '').trim();
+  if (!applicationId) {
+    throw new Error('Discord application id is unavailable for command registration');
+  }
+
+  const rest = new REST({ version: '10' }).setToken(token);
+  const requests = buildDiscordCommandRegistrationRequests({ applicationId, guildIds });
+
+  for (const request of requests) {
+    try {
+      await rest.put(request.route, { body: request.body });
+      logger.info({ guildId: request.guildId, commandCount: request.body.length }, 'Discord slash commands synced');
+    } catch (err) {
+      logger.warn(
+        { guildId: request.guildId, error: err?.message, code: err?.code || null },
+        'Failed to sync Discord slash commands for guild'
+      );
+    }
+  }
+}
+
+function normalizeInteractionPayload(interaction, text) {
+  const guildId = String(interaction?.guildId || '').trim();
+  const channelId = String(interaction?.channelId || '').trim();
+  const senderId = String(interaction?.user?.id || '').trim();
+  if (!guildId || !channelId || !senderId) return null;
+
+  return {
+    transport: 'discord',
+    actorId: `dc:${guildId}:${channelId}`,
+    senderId,
+    guildId,
+    channelId,
+    type: 'text',
+    text,
+    messageId: String(interaction.id || ''),
+    instanceId: `${config.discord.instanceId}:slash`,
+    attachmentsCount: 0,
+    attachments: [],
+  };
+}
+
+async function handleAutocompleteInteraction(interaction) {
+  const actorId = interaction?.guildId && interaction?.channelId
+    ? `dc:${interaction.guildId}:${interaction.channelId}`
+    : null;
+  const user = actorId ? taskStore.getUser(actorId) : null;
+  const focusedTask = user?.focused_task_id ? taskStore.getTask(user.focused_task_id) : null;
+  const effectiveRunnerKind = focusedTask?.runner_kind || user?.runner_override || 'claude-local';
+  const effectiveTaskModel = focusedTask?.runner_model || '';
+  const modelValues = [
+    ...listSuggestedRunnerModels(effectiveRunnerKind, { taskModel: effectiveTaskModel }),
+    'clear',
+  ];
+
+  const choices = getDiscordAutocompleteChoices(interaction, {
+    projects: projectManager.listProjects(),
+    runnerKinds: listSupportedRunnerKinds({ includeAuto: true }),
+    modelValues,
+  });
+
+  await interaction.respond(choices);
+}
+
+async function handleChatInputInteraction(interaction) {
+  if (!inboundMessageHandler) {
+    await interaction.reply({ content: 'Morpheus ainda nao esta pronto para processar comandos.', ephemeral: true });
+    return;
+  }
+  if (!interaction.inGuild() || !interaction.guildId || !interaction.channelId) {
+    await interaction.reply({ content: 'Este comando so funciona em canais de servidor.', ephemeral: true });
+    return;
+  }
+  if (!isAllowedGuild(interaction.guildId)) {
+    await interaction.reply({ content: 'Este servidor nao esta liberado no Morpheus.', ephemeral: true });
+    return;
+  }
+
+  const text = slashInteractionToLegacyText(interaction);
+  if (!text) {
+    await interaction.reply({ content: 'Comando Discord ainda nao suportado pelo Morpheus.', ephemeral: true });
+    return;
+  }
+
+  const payload = normalizeInteractionPayload(interaction, text);
+  if (!payload) {
+    await interaction.reply({ content: 'Nao foi possivel identificar o contexto do canal.', ephemeral: true });
+    return;
+  }
+
+  await interaction.deferReply({ ephemeral: true });
+
+  try {
+    await inboundMessageHandler(payload);
+    await interaction.editReply('Comando recebido. A resposta foi enviada no canal.');
+  } catch (err) {
+    logger.error({ error: err?.message, stack: err?.stack, commandName: interaction.commandName }, 'Failed to process Discord slash command');
+    await interaction.editReply(`Falha ao processar comando: ${String(err?.message || 'erro desconhecido').slice(0, 180)}`);
+  }
+}
+
+async function handleInteractionCreate(interaction) {
+  try {
+    if (interaction.isAutocomplete()) {
+      await handleAutocompleteInteraction(interaction);
+      return;
+    }
+
+    if (interaction.isChatInputCommand()) {
+      await handleChatInputInteraction(interaction);
+    }
+  } catch (err) {
+    logger.error({ error: err?.message, stack: err?.stack }, 'Discord interaction handler failed');
+
+    if (interaction.isRepliable()) {
+      if (interaction.deferred || interaction.replied) {
+        await interaction.editReply(`Falha ao processar interacao: ${String(err?.message || 'erro desconhecido').slice(0, 180)}`);
+      } else {
+        await interaction.reply({ content: `Falha ao processar interacao: ${String(err?.message || 'erro desconhecido').slice(0, 180)}`, ephemeral: true });
+      }
+    }
+  }
+}
+
 function createClient() {
   const nextClient = new Client({
     intents: [
@@ -228,12 +371,16 @@ function createClient() {
     partials: [Partials.Channel],
   });
 
-  nextClient.on('ready', () => {
+  nextClient.on('clientReady', () => {
     logger.info({ user: nextClient.user?.tag || null }, 'Discord client connected');
   });
 
   nextClient.on('messageCreate', (message) => {
     void handleMessageCreate(message);
+  });
+
+  nextClient.on('interactionCreate', (interaction) => {
+    void handleInteractionCreate(interaction);
   });
 
   nextClient.on('error', (error) => {
@@ -267,6 +414,11 @@ export async function startDiscordClient() {
   startupPromise = (async () => {
     const nextClient = createClient();
     await nextClient.login(token);
+    try {
+      await syncDiscordSlashCommands(nextClient);
+    } catch (err) {
+      logger.error({ error: err?.message, stack: err?.stack }, 'Failed to sync Discord slash commands');
+    }
     if (stopRequested) {
       try { nextClient.destroy(); } catch {}
       return null;
@@ -298,11 +450,45 @@ export async function sendDiscordMessage(channelId, text) {
     : DEFAULT_MAX_MESSAGE_LENGTH;
 
   const parts = splitMessage(String(text || ''), maxLength);
+  const messageIds = [];
   for (const part of parts) {
-    await channel.send({ content: part || ' ' });
+    const message = await channel.send({ content: part || ' ' });
+    messageIds.push(String(message?.id || ''));
   }
 
   logger.debug({ channelId: id, parts: parts.length, totalLength: String(text || '').length }, 'Message sent via Discord');
+  return {
+    primaryMessageId: messageIds.find(Boolean) || null,
+    messageIds: messageIds.filter(Boolean),
+    edited: false,
+  };
+}
+
+export async function upsertDiscordMessage(channelId, text, { messageId = null } = {}) {
+  const { id, channel } = await getTextChannel(channelId);
+
+  const maxLength = Number(config.discord.messageMaxLength) > 0
+    ? Number(config.discord.messageMaxLength)
+    : DEFAULT_MAX_MESSAGE_LENGTH;
+
+  const parts = splitMessage(String(text || ''), maxLength);
+
+  if (messageId && parts.length === 1) {
+    try {
+      const existing = await channel.messages.fetch(String(messageId));
+      if (existing) {
+        await existing.edit({ content: parts[0] || ' ' });
+        logger.debug({ channelId: id, messageId, totalLength: String(text || '').length }, 'Message updated via Discord');
+        return {
+          primaryMessageId: String(existing.id || messageId),
+          messageIds: [String(existing.id || messageId)],
+          edited: true,
+        };
+      }
+    } catch {}
+  }
+
+  return sendDiscordMessage(channelId, text);
 }
 
 export async function sendDiscordImage(channelId, { base64, caption, fileName, mimetype } = {}) {
@@ -371,6 +557,7 @@ export async function downloadDiscordAttachment({ url, fileName, mimetype, size 
 
 export default {
   sendDiscordMessage,
+  upsertDiscordMessage,
   sendDiscordImage,
   sendDiscordAudio,
   sendDiscordFile,

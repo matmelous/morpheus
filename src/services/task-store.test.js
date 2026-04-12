@@ -18,6 +18,8 @@ function cleanupPhone(phone) {
   db.prepare('DELETE FROM project_memory WHERE phone = ?').run(phone);
   db.prepare('DELETE FROM user_shared_memory WHERE phone = ?').run(phone);
   db.prepare('DELETE FROM task_execution_queue WHERE task_id IN (SELECT task_id FROM tasks WHERE phone = ?)').run(phone);
+  db.prepare('DELETE FROM task_audit_logs WHERE task_id IN (SELECT task_id FROM tasks WHERE phone = ?)').run(phone);
+  db.prepare('DELETE FROM task_run_logs WHERE task_id IN (SELECT task_id FROM tasks WHERE phone = ?)').run(phone);
   db.prepare('DELETE FROM task_runs WHERE task_id IN (SELECT task_id FROM tasks WHERE phone = ?)').run(phone);
   db.prepare('DELETE FROM task_messages WHERE task_id IN (SELECT task_id FROM tasks WHERE phone = ?)').run(phone);
   db.prepare('DELETE FROM tasks WHERE phone = ?').run(phone);
@@ -144,6 +146,145 @@ test('taskStore chat history CRUD', () => {
   const cleared = taskStore.clearChatHistory(phone);
   assert.equal(cleared, 2);
   assert.equal(taskStore.listChatHistory(phone, { limit: 10 }).length, 0);
+
+  cleanupPhone(phone);
+});
+
+test('taskStore run logs preserves full content and supports tail reads', () => {
+  const phone = `test-run-logs-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+  cleanupPhone(phone);
+
+  const task = taskStore.createTask({
+    phone,
+    projectId: 'morpheus',
+    cwd: '/tmp/morpheus',
+    runnerKind: 'codex-cli',
+    title: 'Run logs',
+  });
+  const run = taskStore.createRun({
+    taskId: task.task_id,
+    runnerKind: 'codex-cli',
+    prompt: 'execute',
+    commandJson: JSON.stringify({ command: 'codex', args: ['exec', '<prompt>'] }),
+    artifactsDir: '/tmp/morpheus/runs',
+    status: 'running',
+  });
+
+  const longLine = 'A'.repeat(1200);
+  taskStore.insertRunLog({ runId: run.run_id, taskId: task.task_id, stream: 'stdout', content: `line-1 ${longLine}` });
+  taskStore.insertRunLog({ runId: run.run_id, taskId: task.task_id, stream: 'stderr', content: 'line-2 stderr full text' });
+  taskStore.insertRunLog({ runId: run.run_id, taskId: task.task_id, stream: 'update', content: 'line-3 update full text' });
+
+  const full = taskStore.listRunLogsByRun(run.run_id, { afterId: 0, limit: 10 });
+  assert.equal(full.length, 3);
+  assert.match(full[0].content, /A{1200}/);
+  assert.equal(full[1].stream, 'stderr');
+  assert.equal(full[2].stream, 'update');
+
+  const afterFirst = taskStore.listRunLogsByRun(run.run_id, { afterId: full[0].id, limit: 10 });
+  assert.equal(afterFirst.length, 2);
+  assert.equal(afterFirst[0].content, 'line-2 stderr full text');
+
+  const tail = taskStore.listRunLogsTailByRun(run.run_id, 2);
+  assert.equal(tail.length, 2);
+  assert.equal(tail[0].content, 'line-2 stderr full text');
+  assert.equal(tail[1].content, 'line-3 update full text');
+
+  const latestRun = taskStore.getLatestRunForTask(task.task_id);
+  assert.equal(latestRun?.run_id, run.run_id);
+
+  cleanupPhone(phone);
+});
+
+test('taskStore persists task runner model override', () => {
+  const phone = `test-runner-model-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+  cleanupPhone(phone);
+
+  const task = taskStore.createTask({
+    phone,
+    projectId: 'morpheus',
+    cwd: '/tmp/morpheus',
+    runnerKind: 'claude-local',
+    title: 'Runner model',
+  });
+
+  assert.equal(task.runner_model, null);
+
+  taskStore.updateTask(task.task_id, { runner_model: 'gemma4:e4b' });
+  assert.equal(taskStore.getTask(task.task_id)?.runner_model, 'gemma4:e4b');
+
+  taskStore.updateTask(task.task_id, { runner_model: null });
+  assert.equal(taskStore.getTask(task.task_id)?.runner_model, null);
+
+  cleanupPhone(phone);
+});
+
+test('taskStore audit logs preserves full morpheus trace and tail listing', () => {
+  const phone = `test-audit-logs-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+  cleanupPhone(phone);
+
+  const task = taskStore.createTask({
+    phone,
+    projectId: 'morpheus',
+    cwd: '/tmp/morpheus',
+    runnerKind: 'codex-cli',
+    title: 'Audit logs',
+  });
+  const run = taskStore.createRun({
+    taskId: task.task_id,
+    runnerKind: 'codex-cli',
+    prompt: 'execute',
+    commandJson: JSON.stringify({ command: 'codex', args: ['exec', '<prompt>'] }),
+    artifactsDir: '/tmp/morpheus/runs',
+    status: 'running',
+  });
+
+  const lineA = 'planner picked run action with strict scope and memory constraints';
+  const lineB = 'executor started run and spawned command';
+  const lineC = `run closed with done status and tokens ${'X'.repeat(400)}`;
+
+  taskStore.insertTaskAuditLog({
+    taskId: task.task_id,
+    stage: 'planner',
+    level: 'info',
+    event: 'plan_selected',
+    content: lineA,
+    metaJson: JSON.stringify({ provider: 'openrouter', action: 'run' }),
+  });
+  taskStore.insertTaskAuditLog({
+    taskId: task.task_id,
+    runId: run.run_id,
+    stage: 'executor',
+    level: 'info',
+    event: 'run_started',
+    content: lineB,
+  });
+  taskStore.insertTaskAuditLog({
+    taskId: task.task_id,
+    runId: run.run_id,
+    stage: 'executor',
+    level: 'info',
+    event: 'run_closed',
+    content: lineC,
+  });
+
+  const all = taskStore.listTaskAuditLogsByTask(task.task_id, { afterId: 0, limit: 10 });
+  assert.equal(all.length, 3);
+  assert.equal(all[0].event, 'plan_selected');
+  assert.equal(all[1].run_id, run.run_id);
+  assert.match(all[2].content, /X{400}/);
+
+  const afterFirst = taskStore.listTaskAuditLogsByTask(task.task_id, { afterId: all[0].id, limit: 10 });
+  assert.equal(afterFirst.length, 2);
+  assert.equal(afterFirst[0].event, 'run_started');
+
+  const tail = taskStore.listTaskAuditLogTailByTask(task.task_id, 2);
+  assert.equal(tail.length, 2);
+  assert.equal(tail[0].event, 'run_started');
+  assert.equal(tail[1].event, 'run_closed');
 
   cleanupPhone(phone);
 });

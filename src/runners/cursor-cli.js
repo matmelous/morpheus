@@ -29,15 +29,15 @@ function summarizeToolCall(toolCall) {
   if (!toolCall || typeof toolCall !== 'object') return null;
   if (toolCall.readToolCall?.args?.path) {
     const p = String(toolCall.readToolCall.args.path);
-    return `Read: ${p.split(/[\\/]/).pop()}`;
+    return `Read: ${p}`;
   }
   if (toolCall.editToolCall?.args?.path) {
     const p = String(toolCall.editToolCall.args.path);
-    return `Edit: ${p.split(/[\\/]/).pop()}`;
+    return `Edit: ${p}`;
   }
   if (toolCall.bashToolCall?.args?.command) {
     const c = String(toolCall.bashToolCall.args.command);
-    return `Bash: ${c.slice(0, 120)}`;
+    return `Bash: ${c}`;
   }
   // Unknown tool call shape.
   const key = Object.keys(toolCall)[0];
@@ -71,7 +71,7 @@ export function cursorParseLine({ obj, rawLine }) {
     const text = extractTextFromContentBlocks(obj.message?.content).trim();
     if (!text) return null;
     return {
-      updateText: `assistant: ${text.slice(0, 160)}`,
+      updateText: `assistant: ${text}`,
       assistantDelta: text + '\n',
       usage,
     };

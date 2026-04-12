@@ -258,6 +258,22 @@ export async function orchestrateTaskMessage({
 
   for (const provider of providersToTry) {
     try {
+      try {
+        taskStore.insertTaskAuditLog({
+          taskId: task.task_id,
+          stage: 'planner',
+          level: 'info',
+          event: 'provider_attempt',
+          content: provider,
+          metaJson: JSON.stringify({
+            providersToTry,
+            forcedRunnerKind: forcedRunnerKind || null,
+            defaultRunnerKind,
+            budgetBefore,
+          }),
+        });
+      } catch {}
+
       let assistantText = '';
       let providerMeta = {};
       let providerUsage = null;
@@ -354,6 +370,26 @@ export async function orchestrateTaskMessage({
       });
 
       const firstProvider = providersToTry[0];
+      try {
+        taskStore.insertTaskAuditLog({
+          taskId: task.task_id,
+          stage: 'planner',
+          level: 'info',
+          event: 'provider_success',
+          content: JSON.stringify({
+            provider,
+            model: providerMeta.model || null,
+            usedFallback: provider !== firstProvider,
+            action: plan?.action || null,
+            runner_kind: plan?.runner_kind || null,
+          }),
+          metaJson: JSON.stringify({
+            usage: finalUsage,
+            compactionMeta,
+          }),
+        });
+      } catch {}
+
       return {
         plan,
         providerUsed: provider,
@@ -367,6 +403,16 @@ export async function orchestrateTaskMessage({
         taskTokenTotals,
       };
     } catch (err) {
+      try {
+        taskStore.insertTaskAuditLog({
+          taskId: task.task_id,
+          stage: 'planner',
+          level: 'warn',
+          event: 'provider_failed',
+          content: err?.message || String(err),
+          metaJson: JSON.stringify({ provider }),
+        });
+      } catch {}
       if (provider === 'gemini-cli') {
         const cls = classifyGeminiFailure(err?.message || String(err));
         if (cls) {
