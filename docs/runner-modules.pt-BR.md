@@ -44,6 +44,21 @@ export default {
     ],
   },
 
+  // opcional: sugestoes locais de modelo para autocomplete de /model
+  modelDiscovery: {
+    // suportado hoje: "claude-settings"
+    type: 'claude-settings',
+
+    // diretorio local do settings do Claude (nao versionar nome de cliente aqui)
+    configDir: '~/.claude-meu-perfil',
+
+    // modelos de fallback para adicionar depois dos descobertos
+    models: ['sonnet', 'opus'],
+
+    // inclui defaults genericos do Claude (padrao: true)
+    includeGenericModels: true,
+  },
+
   // obrigatório: monta o comando executado pelo executor
   build({ prompt, cwd, artifactsDir, config }) {
     const command = '/usr/local/bin/minha-cli';
@@ -83,6 +98,17 @@ Se presentes, esses campos entram no prompt do orchestrator para melhorar escolh
 - `whenToUse`: lista de gatilhos/situações em que esse runner deve ser preferido.
 - `promptRules`: contrato de entrada esperado pelo runner.
 - `promptExamples`: exemplos de prompts válidos.
+
+### Metadados `modelDiscovery` (opcional)
+
+Use isso quando um runner local precisar sugerir modelos no `/model` sem hardcode de nomes de perfis no repositório principal.
+
+- `type="claude-settings"`: lê modelos de `<configDir>/settings.json`.
+- `configDir`: diretório local do perfil Claude (aceita `~`).
+- `models`: sugestões estáticas/de fallback adicionadas depois dos modelos descobertos.
+- `includeGenericModels`: quando `true` ou omitido, adiciona defaults genéricos do Claude, como `sonnet`, `opus` e `haiku`.
+
+Esses metadados foram pensados para módulos locais dentro de `runner-modules/`, que já fica ignorado pelo git.
 
 ## Regras de carregamento
 
