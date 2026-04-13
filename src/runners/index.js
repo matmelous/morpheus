@@ -112,6 +112,46 @@ function normalizePlannerMetadata(rawPlanner) {
   };
 }
 
+function normalizeModelDiscovery(rawModelDiscovery) {
+  if (!rawModelDiscovery || typeof rawModelDiscovery !== 'object') return null;
+
+  const type = String(rawModelDiscovery.type || rawModelDiscovery.strategy || '')
+    .trim()
+    .toLowerCase();
+  const configDir = String(
+    rawModelDiscovery.configDir
+    || rawModelDiscovery.config_dir
+    || rawModelDiscovery.directory
+    || ''
+  ).trim();
+  const rawModels = Array.isArray(rawModelDiscovery.models)
+    ? rawModelDiscovery.models
+    : Array.isArray(rawModelDiscovery.fallbackModels)
+      ? rawModelDiscovery.fallbackModels
+      : Array.isArray(rawModelDiscovery.fallback_models)
+        ? rawModelDiscovery.fallback_models
+        : [];
+  const models = normalizePlannerList(rawModels, { maxItems: 12, maxLen: 220 });
+
+  let includeGenericModels = null;
+  if (typeof rawModelDiscovery.includeGenericModels === 'boolean') {
+    includeGenericModels = rawModelDiscovery.includeGenericModels;
+  } else if (typeof rawModelDiscovery.include_generic_models === 'boolean') {
+    includeGenericModels = rawModelDiscovery.include_generic_models;
+  }
+
+  if (!type && !configDir && models.length === 0 && includeGenericModels == null) {
+    return null;
+  }
+
+  return {
+    type: type || null,
+    configDir: configDir || null,
+    models,
+    includeGenericModels,
+  };
+}
+
 function normalizeExternalRunner(rawRunner, sourcePath) {
   if (!rawRunner || typeof rawRunner !== 'object') return null;
 
@@ -130,6 +170,7 @@ function normalizeExternalRunner(rawRunner, sourcePath) {
     build: rawRunner.build,
     parseLine: typeof rawRunner.parseLine === 'function' ? rawRunner.parseLine : null,
     planner: normalizePlannerMetadata(rawRunner.planner || rawRunner.capabilities || null),
+    modelDiscovery: normalizeModelDiscovery(rawRunner.modelDiscovery || rawRunner.model_discovery || null),
   };
 }
 
