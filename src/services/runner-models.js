@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import os from 'node:os';
 import { resolve } from 'node:path';
 import { config } from '../config/index.js';
+import { getRunner } from '../runners/index.js';
 
 function pushUnique(list, value) {
   const text = String(value || '').trim();
@@ -45,6 +46,14 @@ function getHomeDir() {
   return os.homedir();
 }
 
+function resolveLocalPath(value) {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  if (text === '~') return getHomeDir();
+  if (text.startsWith('~/')) return resolve(getHomeDir(), text.slice(2));
+  return resolve(text);
+}
+
 function listLocalClaudeModels() {
   const out = readClaudeProfileModels(resolve(getHomeDir(), '.claude-local'));
   pushUnique(out, 'gemma4:e4b');
@@ -70,11 +79,56 @@ function listGenericClaudeModels() {
   return out;
 }
 
+function defaultResolveRunnerModelProfile(runnerKind) {
+  const runner = getRunner(runnerKind);
+  if (!runner || !runner.modelDiscovery || typeof runner.modelDiscovery !== 'object') return null;
+  return runner.modelDiscovery;
+}
+
+let resolveRunnerModelProfile = defaultResolveRunnerModelProfile;
+
+function listConfiguredRunnerModels(modelDiscovery) {
+  const out = [];
+  if (!modelDiscovery || typeof modelDiscovery !== 'object') return out;
+
+  const type = String(modelDiscovery.type || modelDiscovery.strategy || '').trim().toLowerCase();
+  const configDir = resolveLocalPath(
+    modelDiscovery.configDir || modelDiscovery.config_dir || modelDiscovery.directory || ''
+  );
+
+  if (type === 'claude-settings' && configDir) {
+    for (const item of readClaudeProfileModels(configDir)) pushUnique(out, item);
+  }
+
+  const configuredModels = Array.isArray(modelDiscovery.models)
+    ? modelDiscovery.models
+    : Array.isArray(modelDiscovery.fallbackModels)
+      ? modelDiscovery.fallbackModels
+      : Array.isArray(modelDiscovery.fallback_models)
+        ? modelDiscovery.fallback_models
+        : [];
+  for (const item of configuredModels) pushUnique(out, item);
+
+  const includeGenericModels = modelDiscovery.includeGenericModels !== false
+    && modelDiscovery.include_generic_models !== false;
+  if (type === 'claude-settings' && includeGenericModels) {
+    for (const item of listGenericClaudeModels()) pushUnique(out, item);
+  }
+
+  return out;
+}
+
 export function listSuggestedRunnerModels(runnerKind, { taskModel = '' } = {}) {
   const normalizedRunner = String(runnerKind || '').trim().toLowerCase();
   const out = [];
 
   pushUnique(out, taskModel);
+
+  const configuredModels = listConfiguredRunnerModels(resolveRunnerModelProfile(normalizedRunner));
+  if (configuredModels.length > 0) {
+    for (const item of configuredModels) pushUnique(out, item);
+    return out;
+  }
 
   if (normalizedRunner === 'claude-local') {
     for (const item of listLocalClaudeModels()) pushUnique(out, item);
@@ -86,22 +140,18 @@ export function listSuggestedRunnerModels(runnerKind, { taskModel = '' } = {}) {
     return out;
   }
 
-  if (normalizedRunner === 'claude-pessoal') {
-    for (const item of readClaudeProfileModels(resolve(getHomeDir(), '.claude-pessoal'))) pushUnique(out, item);
-    for (const item of listGenericClaudeModels()) pushUnique(out, item);
-    return out;
-  }
-
-  if (normalizedRunner === 'claude-team-profile') {
-    for (const item of readClaudeProfileModels(resolve(getHomeDir(), '.claude-team-profile'))) pushUnique(out, item);
-    for (const item of listGenericClaudeModels()) pushUnique(out, item);
-    return out;
-  }
-
   if (normalizedRunner === 'claude-cli' || normalizedRunner.startsWith('claude')) {
     for (const item of listGenericClaudeModels()) pushUnique(out, item);
     return out;
   }
 
   return out;
+}
+
+export function __setRunnerModelProfileResolverForTest(resolver) {
+  resolveRunnerModelProfile = typeof resolver === 'function' ? resolver : defaultResolveRunnerModelProfile;
+}
+
+export function __resetRunnerModelProfileResolverForTest() {
+  resolveRunnerModelProfile = defaultResolveRunnerModelProfile;
 }
