@@ -339,6 +339,15 @@ async function getSocketForSend() {
   return socket;
 }
 
+export function getWhatsAppClientStatus() {
+  return {
+    enabled: config.whatsappEnabled,
+    connected: Boolean(socket),
+    instanceId: config.whatsappInstanceId,
+    me: socket?.user?.id || null,
+  };
+}
+
 export function setInboundMessageHandler(handler) {
   inboundMessageHandler = typeof handler === 'function' ? handler : null;
 }
@@ -444,6 +453,7 @@ export async function sendImage(to, { base64, caption } = {}) {
 
 export default {
   downloadMedia,
+  getWhatsAppClientStatus,
   ensureWebhookRegistered,
   sendImage,
   sendMessage,
