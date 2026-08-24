@@ -11,7 +11,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const appRoot = resolve(__dirname, '../..');
 
 const RunnerKindSchema = z.string().trim().min(1);
-const OrchestratorProviderSchema = z.enum(['gemini-cli', 'openrouter', 'codex-cli', 'auto']);
+const OrchestratorProviderSchema = z.enum(['gemini-cli', 'openrouter', 'codex-cli', 'claude-cli', 'auto']);
 const TokenEstimatorModeSchema = z.enum(['provider_fallback_estimate']);
 const TokenNotificationLevelSchema = z.enum(['summary']);
 
@@ -80,6 +80,7 @@ const EnvSchema = z.object({
   CURSOR_AGENT_COMMAND: z.string().optional().default(''),
 
   CLAUDE_MODEL: z.string().optional().default('sonnet'),
+  CLAUDE_PLANNER_MODEL: z.string().optional().default(''),
   CLAUDE_PERMISSION_MODE: z.string().optional().default('bypassPermissions'),
   CLAUDE_OUTPUT_FORMAT: z.string().optional().default('stream-json'),
   CLAUDE_VERBOSE: z.string().optional().default('true'),
@@ -176,6 +177,7 @@ export const config = {
   claude: {
     command: normalizeCliCommandForPlatform(env.CLAUDE_CLI_COMMAND || 'claude'),
     model: env.CLAUDE_MODEL,
+    plannerModel: env.CLAUDE_PLANNER_MODEL,
     permissionMode: env.CLAUDE_PERMISSION_MODE,
     outputFormat: env.CLAUDE_OUTPUT_FORMAT,
     verbose: parseBool(env.CLAUDE_VERBOSE, true),

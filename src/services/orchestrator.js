@@ -6,6 +6,7 @@ import { buildPlannerMessages } from '../planner/prompt.js';
 import { planWithGeminiCli } from '../planner/gemini-cli.js';
 import { planWithOpenRouter } from '../planner/openrouter.js';
 import { planWithCodexCli } from '../planner/codex-cli.js';
+import { planWithClaudeCli } from '../planner/claude-cli.js';
 import { isRunnerKindSupported, listRunnerCatalog, listSupportedRunnerKinds } from '../runners/index.js';
 import { taskStore } from './task-store.js';
 import { getOrchestratorProviderDefault, getRunnerDefault } from './settings.js';
@@ -60,6 +61,7 @@ function normalizeProvider(value) {
   if (v === 'openrouter') return 'openrouter';
   if (v === 'gemini-cli') return 'gemini-cli';
   if (v === 'codex-cli') return 'codex-cli';
+  if (v === 'claude-cli') return 'claude-cli';
   if (v === 'auto') return 'auto';
   return null;
 }
@@ -244,10 +246,11 @@ export async function orchestrateTaskMessage({
 
   const providersToTry = [];
   const now = Date.now();
-  const geminiInCooldown = providerPref !== 'openrouter' && providerPref !== 'codex-cli' && geminiCircuit.untilMs && now < geminiCircuit.untilMs;
+  const cliProviderPref = providerPref === 'codex-cli' || providerPref === 'claude-cli';
+  const geminiInCooldown = providerPref !== 'openrouter' && !cliProviderPref && geminiCircuit.untilMs && now < geminiCircuit.untilMs;
 
-  if (providerPref === 'codex-cli') {
-    providersToTry.push('codex-cli');
+  if (cliProviderPref) {
+    providersToTry.push(providerPref);
   } else if (providerPref === 'openrouter' || geminiInCooldown) {
     providersToTry.push('openrouter');
   } else {
@@ -289,6 +292,16 @@ export async function orchestrateTaskMessage({
         providerUsage = normalizeTokenUsage(result.usage, 'provider');
       } else if (provider === 'codex-cli') {
         const result = await planWithCodexCli({
+          systemPrompt: system,
+          userPrompt,
+          timeoutMs: config.plannerTimeoutMs,
+          config,
+        });
+        assistantText = result.assistantText;
+        providerMeta = { model: result.model };
+        providerUsage = normalizeTokenUsage(result.usage, 'provider');
+      } else if (provider === 'claude-cli') {
+        const result = await planWithClaudeCli({
           systemPrompt: system,
           userPrompt,
           timeoutMs: config.plannerTimeoutMs,

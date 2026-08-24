@@ -52,7 +52,9 @@ Practical behavior:
 Supported planner providers:
 
 - `gemini-cli` (default);
-- `openrouter` (fallback/alternative).
+- `openrouter` (fallback/alternative);
+- `codex-cli` (local Codex CLI);
+- `claude-cli` (local Claude Code CLI; model from `CLAUDE_PLANNER_MODEL`).
 
 ## How it works: Runners
 
