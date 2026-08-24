@@ -473,7 +473,7 @@ async function handleCommand(phone, rawText, meta = {}) {
       `/runner [kind] - Ver/alterar runner (${listRunnerKindsText({ includeAuto: true })})\n` +
       `/model [taskId|numero] [modelo|clear] - Ver/alterar modelo da task atual para runners Claude\n` +
       `/loglevel [silent|normal|verbose] - Ver/alterar o nivel de logs no canal/conversa\n` +
-      `/orchestrator [provider] - Ver/alterar planner (gemini-cli|openrouter|codex-cli|auto)\n\n` +
+      `/orchestrator [provider] - Ver/alterar planner (gemini-cli|openrouter|codex-cli|claude-cli|auto)\n\n` +
       `/task-policy [taskIdLen] [historyLimit] - Ver/alterar politica de tasks\n\n` +
       `/confirm - Confirmar uma compra pendente (quando solicitado)\n\n` +
       `/memory - Ver memoria compartilhada\n` +
@@ -1433,7 +1433,7 @@ async function handleCommand(phone, rawText, meta = {}) {
 
   if (cmd === '/orchestrator') {
     const provider = (parts[1] || '').toLowerCase();
-    const allowed = new Set(['gemini-cli', 'openrouter', 'codex-cli', 'auto']);
+    const allowed = new Set(['gemini-cli', 'openrouter', 'codex-cli', 'claude-cli', 'auto']);
 
     if (!provider) {
       const user = taskStore.getUser(phone);
@@ -2165,7 +2165,7 @@ async function routeToTask(phone, taskId, message, messageMeta = {}) {
   if (plan.action === 'set_orchestrator') {
     const provider = String(plan.provider || '').toLowerCase();
     const scope = String(plan.scope || 'user').toLowerCase();
-    const allowed = new Set(['gemini-cli', 'openrouter', 'codex-cli', 'auto']);
+    const allowed = new Set(['gemini-cli', 'openrouter', 'codex-cli', 'claude-cli', 'auto']);
 
     if (!allowed.has(provider)) {
       await sendMessage(phone, '❌ Orchestrator invalido. Use: gemini-cli|openrouter|codex-cli|auto');
